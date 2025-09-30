@@ -1,0 +1,15 @@
+streamlit
+pandas
+python-dateutil
+pytest
+python-dotenv
+scikit-learn
+azure-ai-textanalytics
+transformers
+torch
+plotly
+openpyxl
+tqdm
+SQLAlchemy>=2.0,<3.0
+psycopg[binary]>=3.1,<4.0   
+alembic>=1.13,<2.0          
