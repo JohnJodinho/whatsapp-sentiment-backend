@@ -1,0 +1,23 @@
+
+# https://docs.docker.com/go/compose-spec-reference/
+
+# https://github.com/docker/awesome-compose
+
+
+services:
+  server:
+    build:
+      context: .
+    container_name: fastapi-server
+    ports:
+      - "8000:8000"
+    develop:
+      watch:
+        - action: rebuild
+          path: .
+    
+    env_file:
+      - .env
+ 
+
+

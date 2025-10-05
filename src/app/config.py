@@ -40,14 +40,17 @@ class Settings(BaseSettings):
         return values
     
     
-    @field_validator("CORS_ORIGINS", mode="before")
-    @classmethod
-    def assemble_cors(cls, v):
-        if isinstance(v, str):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, list):
-            return v
-        raise ValueError(v)
+    # @field_validator("CORS_ORIGINS", mode="before")
+    # @classmethod
+    # def assemble_cors(cls, v):
+    #     if v is None or v == "":
+    #         return []
+    #     if isinstance(v, str):
+    #         return [i.strip() for i in v.split(",")]
+    #     if isinstance(v, list):
+    #         return v
+    #     return []
+
     class Config:
         env_file = ".env"
 
