@@ -8,8 +8,9 @@ from src.app.db.base import Base
 class Chat(Base):
     __tablename__ = "chats"
     id: Mapped[int] = mapped_column(
-        Integer, 
-        primary_key=True
+        Integer,
+        primary_key=True,
+        autoincrement=True
     )
     title: Mapped[Optional[str]] = mapped_column(
         String(255), 
@@ -28,8 +29,9 @@ class Chat(Base):
 class Participant(Base):
     __tablename__ = "participants"
     id: Mapped[int] = mapped_column(
-        Integer, 
-        primary_key=True
+        Integer,
+        primary_key=True,
+        autoincrement=True
     )
     chat_id: Mapped[int]= mapped_column(
         ForeignKey("chats.id", ondelete="CASCADE"), 
@@ -59,7 +61,8 @@ class Message(Base):
     __tablename__ = "messages"
     id: Mapped[int] = mapped_column(
         Integer, 
-        primary_key=True
+        primary_key=True,
+        autoincrement=True
     )
     chat_id: Mapped[int] = mapped_column(
         Integer, 
@@ -107,6 +110,7 @@ class Sentiment(Base):
     __tablename__ = "sentiments"
     
     id: Mapped[int] = mapped_column(
+        Integer,
         primary_key=True,
         autoincrement=True
     )
