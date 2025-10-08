@@ -6,7 +6,7 @@ import re
 
 
 @dataclass
-class Message:
+class CleanedMessage:
     """Structured representation of a single chat message."""
     timestamp: Optional[datetime]
     sender: Optional[str]
@@ -20,7 +20,7 @@ class WhatsAppChatParser:
 
     Intended workflow:
       1. detect_format(lines) -> 'ios' | 'android' | 'unknown'
-      2. parse_file(path) -> reads file, picks parser and returns List[Message]
+      2. parse_file(path) -> reads file, picks parser and returns List[CleanedMessage]
       3. _parse_ios / _parse_android -> implement platform-specific parsing
       4. helpers: _merge_continuations, _is_message_start, _parse_timestamp, ...
     """
@@ -74,7 +74,7 @@ class WhatsAppChatParser:
                 return "android"
         return "unknown"
 
-    def parse_file(self, path: str) -> List[Message]:
+    def parse_file(self, path: str) -> List[CleanedMessage]:
         """Open a .txt export, normalize into full messages, then parse."""
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
             raw_lines = f.read().splitlines()
@@ -101,15 +101,15 @@ class WhatsAppChatParser:
     # --------------------
     # Platform parsers (stubs)
     # --------------------
-    def _parse_android(self, lines: List[str]) -> List[Message]:
+    def _parse_android(self, lines: List[str]) -> List[CleanedMessage]:
         """
         Parse Android-style logical message lines (one entry == one message).
         Each line expected like:
             "27/05/21, 7:28 PM - Alice: Hello everyone!"
             or system lines without "Name:" like "27/05/21, 19:31 - Alice left the group"
-        Returns: List[Message]
+        Returns: List[CleanedMessage]
         """
-        messages: List[Message] = []
+        messages: List[CleanedMessage] = []
         android_re = self._android_msg_re
        
         
@@ -139,15 +139,15 @@ class WhatsAppChatParser:
                             msg_body = msg_body
                         else:
                             msg_body = msg_txt
-                        messages.append(Message(timestamp=dt, sender=(sender.strip() if sender else None),
+                        messages.append(CleanedMessage(timestamp=dt, sender=(sender.strip() if sender else None),
                                                 text=msg_body.strip(), raw=line))
                         continue
                     except Exception:
                         # ultimate fallback: put raw line with None timestamp
-                        messages.append(Message(timestamp=None, sender=None, text=line.strip(), raw=line))
+                        messages.append(CleanedMessage(timestamp=None, sender=None, text=line.strip(), raw=line))
                         continue
                 else:
-                    messages.append(Message(timestamp=None, sender=None, text=line.strip(), raw=line))
+                    messages.append(CleanedMessage(timestamp=None, sender=None, text=line.strip(), raw=line))
                     continue
 
             date_part = m.group("date")
@@ -161,18 +161,18 @@ class WhatsAppChatParser:
             else:
                 sender = None  # system message
 
-            messages.append(Message(timestamp=dt, sender=sender, text=message_text.strip(), raw=line))
+            messages.append(CleanedMessage(timestamp=dt, sender=sender, text=message_text.strip(), raw=line))
 
         return messages
 
-    def _parse_ios(self, lines: List[str]) -> List[Message]:
+    def _parse_ios(self, lines: List[str]) -> List[CleanedMessage]:
         """
         Parse iOS-style logical message lines (one entry == one message).
         Each line expected like:
             "[01/13/24, 12:24:48 AM] Alex: Have you finished?"
         or system messages without "Name:"
         """
-        messages: List[Message] = []
+        messages: List[CleanedMessage] = []
         ios_re = self._ios_msg_re
 
         
@@ -184,7 +184,7 @@ class WhatsAppChatParser:
             m = ios_re.match(line)
             if not m:
                 # fallback attempt: treat as raw (no timestamp)
-                messages.append(Message(timestamp=None, sender=None, text=line.strip(), raw=line))
+                messages.append(CleanedMessage(timestamp=None, sender=None, text=line.strip(), raw=line))
                 continue
 
             date_part = m.group("date")
@@ -198,7 +198,7 @@ class WhatsAppChatParser:
             else:
                 sender = None
 
-            messages.append(Message(timestamp=dt, sender=sender, text=message_text.strip(), raw=line))
+            messages.append(CleanedMessage(timestamp=dt, sender=sender, text=message_text.strip(), raw=line))
 
         return messages
 
@@ -362,16 +362,5 @@ class WhatsAppChatParser:
     # - _parse_timestamp -> robust parsing with locale flexibility
 
 
-if __name__ == "__main__":
-    # quick demo for the format detector
-    sample_ios = ["[01/13/24, 12:24:48 AM] Alex: Have you finished that project?"]
-    sample_android = ["27/05/21, 7:28 PM - Alice: Hello everyone!"]
-    parser_android = WhatsAppChatParser(dayfirst=False)
-    parser_ios = WhatsAppChatParser(dayfirst=True)
-    print("Detect iOS sample ->", parser_ios.detect_format(sample_ios))
-    print("Detect Android sample ->", parser_android.detect_format(sample_android))
-    file_path = "sample_data/WhatsApp Chat with Mira Neigh/WhatsApp Chat with Mira Neigh.txt"
 
-    messages = parser_android.parse_file(file_path)
-    print(f"Parsed {len(messages)} messages from {file_path}")
 

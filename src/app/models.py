@@ -90,11 +90,11 @@ class Message(Base):
         nullable=False
     )
     
-    chat: Mapped["chat"] = relationship(
+    chat: Mapped["Chat"] = relationship(
         "Chat", 
         back_populates="messages"
     )
-    Participant: Mapped[Optional["Participant"]] = relationship(
+    participant: Mapped[Optional["Participant"]] = relationship(
         "Participant", 
         back_populates="messages"
     )

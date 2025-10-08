@@ -3,17 +3,12 @@ from typing import Dict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
+from src.app.utils.raw_txt_parser import CleanedMessage
 
 # ----------------------------------------
 # Data structures
 # ----------------------------------------
-@dataclass
-class Message:
-    """Structured representation of a single chat message."""
-    timestamp: Optional[datetime]
-    sender: Optional[str]
-    text: str
-    raw: str = ""
+
 
 
 # ----------------------------------------
@@ -59,11 +54,54 @@ def normalize_message(s: str) -> str:
     s = s.strip()
     return s
 
+def preprocess_messages(messages: list[CleanedMessage]) -> list[CleanedMessage]:
+    """
+    Remove system messages (no sender) and mask media placeholders
+    for both Android and iOS exports.
+    """
+    filtered: list[CleanedMessage] = []
 
-def clean_message(msg: Message) -> Message:
+    # Common WhatsApp media placeholders (case-insensitive)
+    MEDIA_PATTERNS = [
+        r"<Media omitted>",
+        r"\[Media omitted\]",
+        r"<image omitted>",
+        r"\[image omitted\]",
+        r"<audio omitted>",
+        r"\[audio omitted\]",
+        r"<video omitted>",
+        r"\[video omitted\]",
+        r"<document omitted>",
+        r"\[document omitted\]",
+        r"<sticker omitted>",
+        r"\[sticker omitted\]",
+    ]
+    MEDIA_RE = re.compile("|".join(MEDIA_PATTERNS), re.IGNORECASE)
+
+    for msg in messages:
+        # Skip system messages (no sender)
+        if msg.sender is None:
+            continue
+
+        # Mask media messages instead of removing them (preserve timestamp + sender)
+        if MEDIA_RE.fullmatch(msg.text.strip()):
+            masked = CleanedMessage(
+                timestamp=msg.timestamp,
+                sender=msg.sender,
+                text="[MEDIA]",
+                raw=msg.raw,
+            )
+            filtered.append(masked)
+        else:
+            filtered.append(msg)
+
+    return filtered
+
+
+def clean_message(msg: CleanedMessage) -> CleanedMessage:
     """Return a new Message object with cleaned text."""
     cleaned = normalize_message(msg.text)
-    return Message(
+    return CleanedMessage(
         timestamp=msg.timestamp,
         sender=msg.sender,
         text=cleaned,
@@ -71,8 +109,9 @@ def clean_message(msg: Message) -> Message:
     )
 
 
-def clean_messages(messages: list[Message]) -> list[Message]:
+def clean_messages(messages: list[CleanedMessage]) -> list[CleanedMessage]:
     """Batch clean messages efficiently."""
+    messages = preprocess_messages(messages)
     return [clean_message(m) for m in messages]
 
 
