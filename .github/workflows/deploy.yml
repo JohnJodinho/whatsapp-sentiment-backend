@@ -20,8 +20,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # --- ADD THIS NEW STEP HERE ---
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      # ------------------------------
+
       - name: Azure Login
-        uses: azure/login@v2  # Updated to v2 (Recommended)
+        uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
@@ -40,8 +45,6 @@ jobs:
           tags: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:cache
           cache-to: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:cache,mode=max
-
-      # --- DEPLOYMENT STEPS ---
 
       # 1. Update API (Standard Action works fine here)
       - name: Deploy API
