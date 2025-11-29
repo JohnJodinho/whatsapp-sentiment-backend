@@ -1,13 +1,17 @@
 from pydantic import AnyUrl, AnyHttpUrl, field_validator, PostgresDsn, model_validator
-try:
-    from pydantic import BaseSettings  # For pydantic v1
-except ImportError:
-    from pydantic_settings import BaseSettings  # For pydantic v2
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional, List
 import secrets
+import logging
+import logging.config
+
+
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     PROJECT_NAME: str = "WhatsApp Sentiment Dashboard"
+    APP_NAME: str = PROJECT_NAME  
     ENVIRONMENT: str = "development"
 
     DB_USER: str
@@ -17,9 +21,35 @@ class Settings(BaseSettings):
     DB_NAME: str
     DATABASE_URL: Optional[PostgresDsn] = None
 
+    # Azure OpenAI configs...
+    AZURE_OPENAI_ENDPOINT: AnyHttpUrl
+    AZURE_OPENAI_API_KEY: str
+    AZURE_OPENAI_DEPLOYMENT: str
+    AZURE_OPENAI_API_VERSION: str
+    AZURE_OPENAI_ENDPOINT_SUMMARY: AnyHttpUrl
+    AZURE_OPENAI_DEPLOYMENT_SUMMARY: str
+    AZURE_OPENAI_API_KEY_SUMMARY: str
+    AZURE_OPENAI_API_VERSION_SUMMARY: str
+    AZURE_OPENAI_ENDPOINT_ROUTER: AnyHttpUrl
+    AZURE_OPENAI_DEPLOYMENT_ROUTER: str
+    AZURE_OPENAI_API_KEY_ROUTER: str
+    AZURE_OPENAI_API_VERSION_ROUTER: str
+
     SECRET_KEY: str = secrets.token_urlsafe(32)
+    
     CELERY_BROKER_URL: Optional[str] = None
-    CORS_ORIGINS: List[AnyHttpUrl] = []
+    CELERY_RESULT_BACKEND: Optional[str] = None
+    
+    CORS_ORIGINS: List[str] = []
+    JWT_ALGORITHM: str
+    JWT_ACCESS_TOKEN_EXPIRE_DAYS: int 
+    
+    CORS_ALLOW_CREDENTIALS: bool = True
+    TRUSTED_HOSTS: List[str] = ["*"]
+
+
+    DB_CONNECT_RETRIES: int = 3
+    DB_CONNECT_BACKOFF_SECONDS: int = 2
 
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
@@ -29,31 +59,45 @@ class Settings(BaseSettings):
     @model_validator(mode="before")
     @classmethod
     def assemble_database_url(cls, values):
-        if not values.get("DATABASE_URL"):
-           user = values.get("DB_USER")
-           password = values.get("DB_PASSWORD")
-           host = values.get("DB_HOST")
-           port = values.get("DB_PORT")
-           db = values.get("DB_NAME")
+        # 1. Check if URL is provided directly
+        if values.get("DATABASE_URL"):
+            url = str(values.get("DATABASE_URL"))
+            # If it starts with postgresql:// but not postgresql+asyncpg://, fix it
+            if url.startswith("postgresql://") and "asyncpg" not in url:
+                values["DATABASE_URL"] = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        
+        # 2. If no URL provided, assemble it from parts (your existing logic)
+        elif not values.get("DATABASE_URL"):
+            user = values.get("DB_USER")
+            password = values.get("DB_PASSWORD")
+            host = values.get("DB_HOST")
+            port = values.get("DB_PORT")
+            db = values.get("DB_NAME")
 
-           values["DATABASE_URL"] = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}"
+            values["DATABASE_URL"] = (
+                f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}"
+            )
+            
         return values
-    
-    
-    # @field_validator("CORS_ORIGINS", mode="before")
-    # @classmethod
-    # def assemble_cors(cls, v):
-    #     if v is None or v == "":
-    #         return []
-    #     if isinstance(v, str):
-    #         return [i.strip() for i in v.split(",")]
-    #     if isinstance(v, list):
-    #         return v
-    #     return []
-
-    class Config:
-        env_file = ".env"
 
 settings = Settings()
 
 
+
+def setup_logging():
+    """Configure global logging level and format based on settings."""
+    log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Suppress noisy loggers from dependencies
+    # logging.getLogger("uvicorn").setLevel(logging.WARNING)
+    # logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    # logging.getLogger("asyncio").setLevel(logging.WARNING)
+    # logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("multipart").setLevel(logging.WARNING)

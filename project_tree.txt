@@ -1,0 +1,123 @@
+alembic.ini
+compose.yaml
+Dockerfile
+pytest.ini
+README.Docker.md
+README.md
+requirements.txt
+
+alembic/
+    env.py
+    README
+    script.py.mako
+    __pycache__/
+    versions/
+        293bf8cae101_add_conversation_history_table.py
+        2bae362756b9_version_9.py
+        3bdda54c971f_update_embedding_dimension_to_3072.py
+
+inst/
+    backend_dashboard_implementation_logic.md
+    dashboard_logic_blueprint.md
+    project_description.md
+
+onnx_model/
+    config.json
+    model.onnx
+    special_tokens_map.json
+    tokenizer_config.json
+    tokenizer.json
+
+onnx_model_optimized/
+    config.json
+    model_optimized.onnx
+    model.onnx
+    ort_config.json
+    special_tokens_map.json
+    tokenizer_config.json
+    tokenizer.json
+
+outputs/
+    naija_stageB_report_20251009_080416.txt
+    naija_stageB_report_20251009_085514.txt
+    stageB_scores_20251009_080416.csv
+    stageB_scores_20251009_085514.csv
+
+reports/
+    sentiment_benchmark_2025-10-10_06-58-54.txt
+    sentiment_benchmark_2025-10-10_07-25-30.txt
+    sentiment_benchmark_2025-10-10_07-35-40.txt
+    sentiment_benchmark_2025-10-10_07-52-57.txt
+    sentiment_benchmark_2025-11-06_23-30-34.txt
+    sentiment_results_2025-10-10_06-58-54.csv
+    sentiment_results_2025-10-10_07-25-30.csv
+    sentiment_results_2025-10-10_07-35-40.csv
+    sentiment_results_2025-10-10_07-52-57.csv
+    sentiment_results_2025-11-06_23-30-34.csv
+
+sample_data/
+    cleaned_messages Chat with John.json
+    cleaned_messages Chat with SUPER EAGLES.json
+    cleaned_messages.json
+    time_segments Chat with John.json
+    time_segments Chat with SUPER EAGLES.json
+    time_segments.json
+
+scripts/
+    convert_to_onnx_optimized.py
+    convert_to_onnx.py
+    sentiment_infer_test_onnx.py
+    __pycache__/
+
+src/
+    app - Shortcut.lnk
+    app/
+        __init__.py
+        main.py
+        config.py
+        logging_config.py
+        limiter.py
+        security.py
+        schemas.py
+        models.py
+        crud.py
+        db/
+            base.py
+            session.py
+        routers/
+            __init__.py
+            auth.py
+            chats.py
+            dashboard.py
+            rag.py
+            rag_streamed.py
+            sentiment_dashboard.py
+            sentiment_sse.py
+            uploads.py
+        services/
+            dashboard_service.py
+            embedding_service.py
+            embedding_service_summary_version.py
+            embedding_worker.py
+            retrieval_service.py
+            retrieval_service_summary_version.py
+            rag_service.py
+            rag_service_prev.py
+            router_service.py
+            sentiment_worker.py
+            sentiment_worker1.py
+            sentiment_dashboard_service.py
+            summary_service.py
+        utils/
+            types.py
+            segment_chat.py
+            raw_txt_parser.py
+            pre_process.py
+            message_analytics.py
+            extract_file_name.py
+
+data/
+
+live/
+
+# Note: `tests/` and `venv312/` were intentionally excluded as requested.

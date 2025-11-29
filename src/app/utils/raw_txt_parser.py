@@ -46,10 +46,11 @@ class WhatsAppChatParser:
         )
 
         # iOS: e.g. "[01/13/24, 12:24:48 AM] Alex: Hello"
+        # Added \u200e? to handle invisible Left-to-Right Mark (LRM)
         self._ios_msg_re = re.compile(
-            r"^\[(?P<date>\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}),\s"
+            r"^\u200e?\[(?P<date>\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}),\s"
             r"(?P<time>\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APMapm]{2})?)\]\s"
-            r"(?:(?P<sender>[^:]+):\s)?(?P<message>.*)$"
+            r"(?:(?P<sender>[^:]+):\s)?\u200e?(?P<message>.*)$"
         )
 
         # Simple detectors for message-start lines (used in merging)
@@ -57,7 +58,7 @@ class WhatsAppChatParser:
             r"^\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4},\s\d{1,2}:\d{2}"
         )
         self._ios_start_re = re.compile(
-            r"^\[\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4},\s\d{1,2}:\d{2}"
+            r"^\u200e?\[\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4},\s\d{1,2}:\d{2}"
         )
 
     def detect_format(self, lines: Iterable[str]) -> str:
@@ -121,18 +122,14 @@ class WhatsAppChatParser:
                 continue
             m = android_re.match(line)
             if not m:
-                # fallback: try to salvage by splitting on " - " once
                 if " - " in line:
                     try:
                         header, msg_txt = line.split(" - ", 1)
-                        # header like "27/05/21, 7:28 PM"
-                        # attempt to split header into date and time
                         if "," in header:
                             date_part, time_part = header.split(",", 1)
                             dt = self._parse_datetime_components(date_part.strip(), time_part.strip(), is_dayfirst=guessed)
                         else:
                             dt = None
-                        # attempt to extract sender if colon present
                         sender = None
                         if ":" in msg_txt:
                             sender, msg_body = msg_txt.split(": ", 1)

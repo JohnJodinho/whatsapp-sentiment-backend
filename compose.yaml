@@ -1,23 +1,56 @@
-
-# https://docs.docker.com/go/compose-spec-reference/
-
-# https://github.com/docker/awesome-compose
-
-
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   server:
     build:
       context: .
-    container_name: fastapi-server
+    container_name: sentiment_scope_api
+    command: python -m uvicorn src.app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
-    develop:
-      watch:
-        - action: rebuild
-          path: .
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379/0
+      
+    env_file: 
+    - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker_sentiment:
+    build:
+      context: .
+    container_name: worker_sentiment
+
+    command: celery -A src.app.services.sentiment_worker.celery_app worker --loglevel=info -Q celery
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker_embeddings:
+    build:
+      context: .
+    container_name: worker_embeddings
     
-    env_file:
-      - .env
- 
-
-
+    command: celery -A src.app.services.sentiment_worker.celery_app worker --loglevel=info -Q generate_embeddings
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy

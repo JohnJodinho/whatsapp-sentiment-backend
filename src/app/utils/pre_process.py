@@ -30,8 +30,34 @@ EMAIL_RE = re.compile(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', re.IGNORECASE)
 
 # word-boundary slang regex for efficiency
 SLANG_RE = re.compile(r'\b(' + '|'.join(map(re.escape, SLANG_DICT.keys())) + r')\b', re.IGNORECASE)
-
-
+SYSTEM_MESSAGE_STRINGS = [
+    "Messages and calls are end-to-end encrypted",
+    "changed the group subject",
+    "changed this group's icon",
+    "changed the group description",
+    "created group",
+    "created this group",
+    "You were added",
+    "You joined",
+    "joined using this group's invite link",
+    "left",
+    "added",
+    "removed",
+    "You're now an admin",
+    "You are now an admin",
+    "You're no longer an admin",
+    "You are no longer an admin",
+    "missed a call",
+    "missed a video call",
+    "deleted this message",
+    "You deleted this message",
+]
+SYSTEM_RE = re.compile("|".join(SYSTEM_MESSAGE_STRINGS), re.IGNORECASE)
+MEDIA_RE = re.compile(
+    r"^\u200e?[<\[]?(image|video|audio|document|sticker|Media)\somitted[>\]]?$",
+    re.IGNORECASE
+)
+CHARS_TO_STRIP = '\u200e \t\n\r'
 # ----------------------------------------
 # Cleaning utilities
 # ----------------------------------------
@@ -56,43 +82,35 @@ def normalize_message(s: str) -> str:
 
 def preprocess_messages(messages: list[CleanedMessage]) -> list[CleanedMessage]:
     """
-    Remove system messages (no sender) and mask media placeholders
+    Remove system messages and mask media placeholders
     for both Android and iOS exports.
     """
     filtered: list[CleanedMessage] = []
 
-    # Common WhatsApp media placeholders (case-insensitive)
-    MEDIA_PATTERNS = [
-        r"<Media omitted>",
-        r"\[Media omitted\]",
-        r"<image omitted>",
-        r"\[image omitted\]",
-        r"<audio omitted>",
-        r"\[audio omitted\]",
-        r"<video omitted>",
-        r"\[video omitted\]",
-        r"<document omitted>",
-        r"\[document omitted\]",
-        r"<sticker omitted>",
-        r"\[sticker omitted\]",
-    ]
-    MEDIA_RE = re.compile("|".join(MEDIA_PATTERNS), re.IGNORECASE)
-
     for msg in messages:
-        # Skip system messages (no sender)
+        # 1. Skip system messages (no sender)
         if msg.sender is None:
             continue
 
-        # Mask media messages instead of removing them (preserve timestamp + sender)
-        if MEDIA_RE.fullmatch(msg.text.strip()):
+        # 2. Skip common system message text, even if sender was parsed
+        if SYSTEM_RE.search(msg.text):
+            continue
+
+        # 3. Mask media messages
+        # We strip standard whitespace AND the invisible LRM character
+        stripped_text = msg.text.strip(CHARS_TO_STRIP)
+
+        # Use the new robust regex
+        if MEDIA_RE.fullmatch(stripped_text):
             masked = CleanedMessage(
                 timestamp=msg.timestamp,
                 sender=msg.sender,
-                text="[MEDIA]",
+                text="[MEDIA]",  # Standardize to [MEDIA]
                 raw=msg.raw,
             )
             filtered.append(masked)
         else:
+            # This is a regular text message
             filtered.append(msg)
 
     return filtered

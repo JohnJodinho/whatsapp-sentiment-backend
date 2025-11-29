@@ -6,10 +6,13 @@ tests/
 __pycache__/
 *.py[cod]
 *$py.class
-
+outputs/
+onnx_model/
+reports/
+sample_data/
 # C extensions
 *.so
-
+inst/
 # Distribution / packaging
 .Python
 build/
