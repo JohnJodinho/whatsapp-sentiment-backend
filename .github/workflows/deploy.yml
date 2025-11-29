@@ -48,14 +48,16 @@ jobs:
 
       # 1. Update API (Standard Action works fine here)
       - name: Deploy API
-        uses: azure/container-apps-deploy-action@v1
+        uses: azure/CLI@v1
         with:
-          imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          containerAppName: sentiment-api
-          resourceGroup: ${{ env.RESOURCE_GROUP }}
-          # 👇 NEW: Credentials so Azure can pull the private image
-          acrUsername: ${{ secrets.ACR_USERNAME }}
-          acrPassword: ${{ secrets.ACR_PASSWORD }}
+          inlineScript: |
+            az containerapp update \
+              --name sentiment-api \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+              --registry-server ${{ secrets.ACR_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.ACR_USERNAME }} \
+              --registry-password ${{ secrets.ACR_PASSWORD }}
 
       # 2. Update Sentiment Worker
       - name: Deploy Sentiment Worker
