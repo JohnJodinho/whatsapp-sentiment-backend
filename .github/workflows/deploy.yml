@@ -53,8 +53,11 @@ jobs:
           imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           containerAppName: sentiment-api
           resourceGroup: ${{ env.RESOURCE_GROUP }}
+          # 👇 NEW: Credentials so Azure can pull the private image
+          acrUsername: ${{ secrets.ACR_USERNAME }}
+          acrPassword: ${{ secrets.ACR_PASSWORD }}
 
-      # 2. Update Sentiment Worker (Using Azure CLI for custom command)
+      # 2. Update Sentiment Worker
       - name: Deploy Sentiment Worker
         uses: azure/CLI@v1
         with:
@@ -63,9 +66,12 @@ jobs:
               --name worker-sentiment \
               --resource-group ${{ env.RESOURCE_GROUP }} \
               --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+              --registry-server ${{ secrets.ACR_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.ACR_USERNAME }} \
+              --registry-password ${{ secrets.ACR_PASSWORD }} \
               --args "-A" "src.app.services.sentiment_worker.celery_app" "worker" "--loglevel=info" "-Q" "celery"
 
-      # 3. Update Embedding Worker (Using Azure CLI for custom command)
+      # 3. Update Embedding Worker
       - name: Deploy Embedding Worker
         uses: azure/CLI@v1
         with:
@@ -74,4 +80,7 @@ jobs:
               --name worker-embeddings \
               --resource-group ${{ env.RESOURCE_GROUP }} \
               --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+              --registry-server ${{ secrets.ACR_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.ACR_USERNAME }} \
+              --registry-password ${{ secrets.ACR_PASSWORD }} \
               --args "-A" "src.app.services.sentiment_worker.celery_app" "worker" "--loglevel=info" "-Q" "generate_embeddings"
