@@ -83,7 +83,6 @@ jobs:
               --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
               --args '"-A"' '"src.app.services.sentiment_worker.celery_app"' '"worker"' '"--loglevel=info"' '"-Q"' '"celery"'
 
-      # 3. Update Embedding Worker
       - name: Deploy Embedding Worker
         uses: azure/CLI@v1
         with:
