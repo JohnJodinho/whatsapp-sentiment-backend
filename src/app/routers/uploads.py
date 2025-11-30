@@ -21,6 +21,9 @@ from src.app.services.sentiment_worker import celery_app
 import src.app.services.embedding_worker
 from src.app.security import get_current_user
 from src.app.limiter import limiter
+import logging
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -47,6 +50,7 @@ async def upload_whatsapp_chat_file(
             while content := await file.read(1024 * 1024):  
                 await out_file.write(content)
     except Exception as e:
+        log.error(f"Error writing file {temp_filename}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail="File upload failed during write."
@@ -87,6 +91,7 @@ async def upload_whatsapp_chat_file(
     except HTTPException:
         raise
     except Exception as e:
+        log.error(f"Error processing uploaded chat file: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Processing failed: {str(e)}"
