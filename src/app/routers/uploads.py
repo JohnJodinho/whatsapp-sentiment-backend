@@ -22,6 +22,7 @@ import src.app.services.embedding_worker
 from src.app.security import get_current_user
 from src.app.limiter import limiter
 import logging
+import tempfile
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ router = APIRouter()
 
 
 @router.post("/whatsapp", response_model=schemas.ChatRead, status_code=status.HTTP_201_CREATED)
-@limiter.limit("1/minute")
+@limiter.limit("5/minute")
 async def upload_whatsapp_chat_file(
     request: Request,
     
@@ -42,7 +43,8 @@ async def upload_whatsapp_chat_file(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file. Please upload a .txt file.")
     
     file_id = str(uuid.uuid4())
-    temp_filename =    f"upload_{file_id}.txt"
+    temp_dir = tempfile.gettempdir()
+    temp_filename =    os.path.join(temp_dir, f"upload_{file_id}.txt")
 
     try:
         
