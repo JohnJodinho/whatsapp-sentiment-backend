@@ -64,7 +64,7 @@ jobs:
               --resource-group ${{ env.RESOURCE_GROUP }} \
               --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-      # 2. Update Sentiment Worker
+      
       - name: Deploy Sentiment Worker
         uses: azure/CLI@v1
         with:
@@ -81,8 +81,7 @@ jobs:
               --name worker-sentiment \
               --resource-group ${{ env.RESOURCE_GROUP }} \
               --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
-              --command 'celery' \
-              --args '"-A"' '"src.app.services.sentiment_worker.celery_app"' '"worker"' '"--loglevel=info"' '"-Q"' '"celery"'
+              
 
       - name: Deploy Embedding Worker
         uses: azure/CLI@v1
@@ -100,5 +99,4 @@ jobs:
               --name worker-embeddings \
               --resource-group ${{ env.RESOURCE_GROUP }} \
               --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
-              --command 'celery' \
-              --args '"-A"' '"src.app.services.sentiment_worker.celery_app"' '"worker"' '"--loglevel=info"' '"-Q"' '"generate_embeddings"'
+              
