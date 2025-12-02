@@ -4,11 +4,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from typing import List
 from src.app.db.session import get_db
 from src.app import crud, models
 from src.app.schemas import RagQueryRequest, RagQueryResponse
-from src.app.services import rag_service, rag_service_prev
+from src.app.services import router_service
 from src.app.schemas import ConversationHistoryItem, RagQueryRequest
 from src.app.security import get_current_user
 from src.app.limiter import limiter
@@ -18,7 +19,6 @@ log = logging.getLogger(__name__)
 
 @router.post(
     "/chat/{chat_id}/query/streamed"
-    # response_model=RagQueryResponse  <-- Removed because we are streaming
 )
 @limiter.limit("5/minute")
 async def query_chat_streamed(
@@ -35,39 +35,30 @@ async def query_chat_streamed(
     chat = await crud.get_chat(db, chat_id=chat_id)
     if not chat or chat.owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Chat not found")
+
     
-    # Return the StreamingResponse immediately
+    
+    history_objs = await crud.get_conversation_history(db, chat_id, limit=6)
+    chat_history_messages = []
+    for h in history_objs:
+        if h.role == "user":
+            chat_history_messages.append(HumanMessage(content=h.content))
+        else:
+            chat_history_messages.append(AIMessage(content=h.content))
+
+    analytics_data = payload.analytics_json or {}
     return StreamingResponse(
-        rag_service.stream_rag_query(chat_id, payload),
+        router_service.route_and_process(
+            query=payload.question,
+            analytics_json=analytics_data,
+            chat_id=chat_id,
+            db=db,
+            chat_history=chat_history_messages
+        ),
         media_type="text/event-stream"
     )
 
 
-@router.post(
-    "/chat/{chat_id}/query",
-    response_model=RagQueryResponse
-)
-async def query_chat(
-    chat_id: int,
-    payload: RagQueryRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Main endpoint for asking questions to a chat.
-
-    """
-
-    chat = await crud.get_chat(db, chat_id=chat_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    
-   
-    try:
-        response = await rag_service_prev.process_rag_query(chat_id, payload)
-        return response
-    except Exception as e:
-        log.error(f"RAG endpoint failed for chat {chat_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error processing your question.")
 
 
 

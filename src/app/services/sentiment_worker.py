@@ -3,9 +3,11 @@ import logging
 import json
 import os
 import psutil  
+import time
 from typing import List, Any
 from celery import Celery
 import redis
+from redis import ConnectionPool
 import time
 from src.app.config import settings
 from optimum.onnxruntime import ORTModelForSequenceClassification
@@ -29,6 +31,8 @@ log = logging.getLogger(__name__)
 
 BROKER_URL = settings.CELERY_BROKER_URL
 BACKEND_URL = settings.CELERY_RESULT_BACKEND
+
+redis_pool = ConnectionPool.from_url(BROKER_URL, decode_responses=True)
 celery_app = Celery(
     "sentiment_worker",
     broker=BROKER_URL,
@@ -53,17 +57,19 @@ _REDIS_CLIENT = None
 
 def get_pipeline():
     """
-    Loads model with CPU-Specific Optimizations.
+    Loads model with Container-Safe Optimizations.
     """
     global _PIPELINE
     if _PIPELINE is None:
         log.info(f"Loading ONNX model from {_MODEL_PATH}...")
         try:
-            
-            n_threads = os.cpu_count() or 4
-            
             sess_options = SessionOptions()
-            sess_options.intra_op_num_threads = n_threads
+            
+            # CRITICAL FIX for Containers:
+            # Set to 1 to prevent thread thrashing. Let Celery workers provide parallelism.
+            # If you are not using Celery concurrency, set this to 2 or 4 max.
+            sess_options.intra_op_num_threads = 1 
+            sess_options.inter_op_num_threads = 1
             sess_options.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
             
             ort_model = ORTModelForSequenceClassification.from_pretrained(
@@ -81,7 +87,7 @@ def get_pipeline():
                 truncation=True,
                 max_length=512
             )
-            log.info(f"ONNX Model loaded (Threads: {n_threads}).")
+            log.info("ONNX Model loaded with single-threaded worker optimization.")
         except Exception as e:
             log.error(f"Failed to load model: {e}")
             raise e
@@ -89,42 +95,42 @@ def get_pipeline():
 
 # Redis Pub/Sub Helper 
 def publish_progress(chat_id: int, status_key: str, data: dict):
-    global _REDIS_CLIENT
+    """
+    Publishes using the global connection pool for low latency.
+    """
     try:
-        if _REDIS_CLIENT is None:
-            _REDIS_CLIENT = redis.from_url(BROKER_URL, decode_responses=True)
-
-        
+        r = redis.Redis(connection_pool=redis_pool)
         channel = f"chat_progress_{chat_id}"
         message = {"status": status_key, "data": data}
-        listeners = _REDIS_CLIENT.publish(channel, json.dumps(message))
-
-        if listeners > 0:
-            log.info(f"SENT {status_key} to Chat {chat_id} (Listeners: {listeners}) | {data.get('percent', '')}%")
-        else:
-            log.warning(f"SENT {status_key} to Chat {chat_id} but NO LISTENERS connected (Frontend might be disconnected)")
+        # Publish and forget - don't block waiting for listeners count logic
+        r.publish(channel, json.dumps(message))
     except Exception as e:
         log.error(f"Redis Publish Error: {e}")
-        _REDIS_CLIENT = None # Reset on error
 
 
-# SMART BATCHING LOGIC (speed optimized)
 async def _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, pipe):
     """
-    Sorts the buffer by text length and processes in mini-batches.
-    To enables effective Dynamic Padding.
+    Sorts by length for speed, but commits and updates progress frequently for UX.
     """
-    # Sort by length of content (Shortest -> Longest)
-    # This ensures a batch of 5-word messages is only padded to ~5 words, not 512.
+    if not buffer:
+        return
+
+    # 1. Sort by length (Shortest -> Longest) for Dynamic Padding efficiency
     buffer.sort(key=lambda x: len(get_text_func(x)))
     
-    BATCH_SIZE = 8
-    start_time = time.time()
+    # Increased batch size slightly for ONNX vectorization
+    BATCH_SIZE = 16 
+    
+    # 2. Track local progress to update UI frequently
+    processed_count = 0
+    UPDATE_FREQUENCY = 50 # Update Redis every 50 items
 
+    # Create a batch container
     for i in range(0, len(buffer), BATCH_SIZE):
         batch_items = buffer[i : i + BATCH_SIZE]
         texts = [get_text_func(item) for item in batch_items]
 
+        # Inference
         preds = pipe(texts, batch_size=len(texts), padding=True, truncation=True)
 
         for item_obj, pred in zip(batch_items, preds):
@@ -133,61 +139,55 @@ async def _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func,
                 "overall_label": p.get("label"),
                 "overall_label_score": p.get("score_positive", p["score"]) if isinstance(p, dict) else p["score"],
             }
+            # Queue the insert in the session
             await create_func(db, item_obj.id, payload, should_commit=False)
-    inference_time = time.time() - start_time
-    log.info(f"Inference finished in {inference_time:.2f}s. Committing to DB...")
-    
-    await db.commit()
-    
-    # Progress rep sending...
-    progress = await crud.get_sentiment_progress(db, chat_id)
-    total = progress["messages_total"] + progress["segments_total"]
-    done = progress["messages_scored"] + progress["segments_scored"]
-    percent = int(100 * (done / total)) if total > 0 else 0
-    
-    publish_progress(chat_id, "progress", {
-        "percent": percent,
-        "messages_done": progress["messages_scored"],
-        "messages_total": progress["messages_total"],
-        "segments_done": progress["segments_scored"],
-        "segments_total": progress["segments_total"]
-    })
+        
+        processed_count += len(batch_items)
+
+        # 3. Intermediate Commit & Update (Solves the "Lag" issue)
+        # We commit every few batches so the DB doesn't lock for too long
+        # and the user sees the progress bar moving.
+        if processed_count % UPDATE_FREQUENCY == 0 or processed_count == len(buffer):
+            await db.commit() 
+            
+            # Fetch current stats for accurate percentage
+            progress = await crud.get_sentiment_progress(db, chat_id)
+            total = progress["messages_total"] + progress["segments_total"]
+            done = progress["messages_scored"] + progress["segments_scored"]
+            percent = int(100 * (done / total)) if total > 0 else 0
+            
+            publish_progress(chat_id, "progress", {
+                "percent": percent,
+                "messages_done": progress["messages_scored"],
+                "messages_total": progress["messages_total"]
+            })
 
 async def _process_stage_batch(db, chat_id, stream_func, create_func, get_text_func, pipe, buffer_size=1000):
-
     buffer = []
     
-    # Fetch chat once for cancel check
     chat = await crud.get_chat(db, chat_id)
     
-    item_count = 0
     async for item in stream_func(db, chat_id):
-        item_count += 1
-        if len(buffer) % 50 == 0:
-            await db.refresh(chat)
-            if chat.cancel_requested:
-                log.warning(f"Cancellation flag detected for Chat {chat_id}")
-                raise Exception("Cancelled by user")
-
         buffer.append(item)
         
+        # Check cancellation less frequently to save DB calls
+        if len(buffer) % 200 == 0:
+            await db.refresh(chat)
+            if chat.cancel_requested:
+                raise Exception("Cancelled by user")
+
         if len(buffer) >= buffer_size:
-            log.info(f"Buffere full ({len(buffer)}). Triggering batch process.")
+            log.info(f"Processing buffer of {len(buffer)} items...")
             await _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, pipe)
             buffer = [] 
 
-    # Take care of remiaining
+    # Remaining items
     if buffer:
-        log.info(f"Processing final buffer of {len(buffer)} items.")
-        await db.refresh(chat)
-        if chat.cancel_requested:
-             raise Exception("Cancelled by user")
         await _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, pipe)
-    if item_count == 0:
-        log.info(f"No items found in this stage for chat {chat_id}.")
 
 
 async def process_chat_logic(chat_id: int):
+    # Initialize pipeline once per worker process lifespan
     pipe = get_pipeline()
     
     worker_engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
@@ -196,18 +196,16 @@ async def process_chat_logic(chat_id: int):
     try:
         async with WorkerSession() as db:
             chat = await crud.get_chat(db, chat_id)
-            if not chat: 
-                log.error(f"Chat {chat_id} not found in DB.")
+            if not chat:
                 return
 
             if chat.sentiment_status != models.SentimentStatusEnum.processing.value:
-                log.info(f"Setting Chat {chat_id} status to PROCESSING.")
                 chat.sentiment_status = models.SentimentStatusEnum.processing.value
                 db.add(chat)
                 await db.commit()
 
             try:
-                log.info(f"Starting Messages for Chat {chat_id} (Smart Batching)")
+                # Process Messages
                 await _process_stage_batch(
                     db=db, 
                     chat_id=chat_id,
@@ -215,10 +213,10 @@ async def process_chat_logic(chat_id: int):
                     create_func=crud.create_message_sentiment,
                     get_text_func=lambda x: x.content,
                     pipe=pipe,
-                    buffer_size=1000 
+                    buffer_size=500 # Reduced buffer size for better responsiveness
                 )
 
-                log.info(f"🚀 Starting Segments for Chat {chat_id}")
+                # Process Segments
                 await _process_stage_batch(
                     db=db, 
                     chat_id=chat_id,
@@ -228,7 +226,8 @@ async def process_chat_logic(chat_id: int):
                     pipe=pipe,
                     buffer_size=200 
                 )
-                log.info(f"[Chat {chat_id}] All stages done. Finalizing...")
+
+                # Finalize
                 final_progress = await crud.get_sentiment_progress(db, chat_id)
                 chat.sentiment_status = models.SentimentStatusEnum.completed.value
                 db.add(chat)
@@ -237,36 +236,29 @@ async def process_chat_logic(chat_id: int):
                 publish_progress(chat_id, "completed", {
                     "percent": 100, 
                     "status": "done",
-                    "messages_done": final_progress["messages_scored"],
-                    "messages_total": final_progress["messages_total"],
-                    "segments_done": final_progress["segments_scored"],
-                    "segments_total": final_progress["segments_total"]
+                    "messages_done": final_progress["messages_scored"]
                 })
-                log.info(f"Chat {chat_id} DONE.")
 
             except Exception as e:
-                log.error(f"Error processing chat {chat_id}: {e}", exc_info=True)
                 await db.rollback()
                 if str(e) == "Cancelled by user":
-                    log.info(f"Chat {chat_id} stopped due to cancellation.")
+                    log.info(f"Chat {chat_id} stopped.")
                 else:
+                    log.error(f"Processing failed: {e}", exc_info=True)
                     chat.sentiment_status = models.SentimentStatusEnum.failed.value
                     db.add(chat)
                     await db.commit()
                     publish_progress(chat_id, "error", {"error": str(e)})
                 raise e
     finally:
-        
         await worker_engine.dispose()
 
-# Entry point
 @celery_app.task(name="analyze_sentiment", bind=True, max_retries=3)
 def analyze_sentiment_task(self, chat_id: int):
-    log.info(f"Received task: analyze_sentiment for Chat {chat_id}")
     try:
+        # Use asyncio.run for the async entry point
         asyncio.run(process_chat_logic(chat_id))
     except Exception as exc:
         if str(exc) == "Cancelled by user":
-            return 
-        log.warning(f"Task failed,  retrying... Error: {exc}")
-        self.retry(exc=exc, countdown=5 * (self.request.retries + 1))
+            return
+        self.retry(exc=exc, countdown=5)

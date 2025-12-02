@@ -10,7 +10,7 @@ import logging.config
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env")
 
-    PROJECT_NAME: str = "WhatsApp Sentiment Dashboard"
+    PROJECT_NAME: str = "SentimentScope API"
     APP_NAME: str = PROJECT_NAME  
     ENVIRONMENT: str = "development"
 
@@ -39,7 +39,8 @@ class Settings(BaseSettings):
     
     CELERY_BROKER_URL: Optional[str] = None
     CELERY_RESULT_BACKEND: Optional[str] = None
-    
+    QDRANT_URL: str
+    QDRANT_API_KEY: str
     CORS_ORIGINS: List[str] = []
     JWT_ALGORITHM: str
     JWT_ACCESS_TOKEN_EXPIRE_DAYS: int 
