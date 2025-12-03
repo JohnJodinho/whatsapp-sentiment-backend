@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:                 
+          lfs: true
 
       # --- ADD THIS NEW STEP HERE ---
       - name: Set up Docker Buildx

@@ -8,7 +8,7 @@ from sqlalchemy.orm import relationship, Mapped, mapped_column
 import uuid
 from sqlalchemy.dialects.postgresql import UUID
 from src.app.db.base import Base
-from src.app.schemas import SentimentStatusEnum
+from src.app.schemas import SentimentStatusEnum, EmbeddingStatusEnum
 from pgvector.sqlalchemy import Vector
 
 
@@ -33,6 +33,15 @@ class Chat(Base):
     )
     sentiment_status: Mapped[SentimentStatusEnum] = mapped_column(
         String(30), nullable=False, default=SentimentStatusEnum.pending.value, index=True
+    )
+    # In your models.py
+
+    embeddings_status: Mapped[EmbeddingStatusEnum] = mapped_column(
+        String(30), 
+        nullable=False, 
+        default=EmbeddingStatusEnum.pending.value,       # Keeps Python logic happy
+        server_default=EmbeddingStatusEnum.pending.value, # <--- ADDS SQL DEFAULT
+        index=True
     )
     cancel_requested: Mapped[Optional[bool]] = mapped_column(Boolean, default=False)
     owner_id: Mapped[uuid.UUID] = mapped_column(

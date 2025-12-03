@@ -1,5 +1,3 @@
-# src/app/services/router_service.py
-
 import logging
 import re
 import json
@@ -21,11 +19,13 @@ from sqlalchemy.exc import (
 from src.app.config import settings
 from src.app.services.retrieval_service import retriever
 from src.app.utils.serializers import serialize_analytics
-from src.app.schemas import RagSource
+
+
+from src.app.schemas import EmbeddingStatusEnum
 from src.app import crud
 log = logging.getLogger(__name__)
 
-# gpt-4o-mini
+
 router_llm = AzureChatOpenAI(
     azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_ROUTER,
     api_version=settings.AZURE_OPENAI_API_VERSION_ROUTER,
@@ -35,14 +35,13 @@ router_llm = AzureChatOpenAI(
     max_tokens=200
 )
 
-# Main LLM for answer generation (e.g., gpt-4o)
 main_llm = AzureChatOpenAI(
-    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_ROUTER, # Or a separate deployment
+    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_ROUTER, 
     api_version=settings.AZURE_OPENAI_API_VERSION_ROUTER,
     azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_ROUTER),
     api_key=settings.AZURE_OPENAI_API_KEY_ROUTER,
     temperature=0.2,
-    max_tokens=700
+    max_tokens=800
 )
 
 FORBIDDEN_KEYWORDS = {
@@ -111,138 +110,123 @@ Relationships:
 - s.message_id = m.id
 """
 
-CLASSIFIER_SYSTEM = """
-You are the Brain of a WhatsApp Chat Analyzer. 
-Classify the user query into exactly one JSON object: {{"intent": "..."}}.
+ROUTER_SYSTEM_PROMPT = """
+You are the Central Dispatch of the SentimentScope Analysis Engine.
+Analyze the User Query and the System Metadata to route the request to the correct worker.
 
-INTENTS:
-1. "analytics_dashboard": Questions answerable by standard summary stats (e.g., "Who talks the most?", "Activity by hour?", "Overall sentiment").
-2. "sql_agent": Specific/Deep statistical questions NOT in a standard dashboard. 
-   Examples: "How many questions did John ask?", "Who has the highest negative sentiment score?", "Count messages with > 100 words".
-3. "vector_search": Content questions. "What did we say about X?", "Find the message about Y".
-4. "hybrid_dashboard": High-level stats + Content context. 
-   (e.g., "Who is the most active user and what do they usually talk about?", "Why is the overall sentiment negative?").
-5. "hybrid_sql": Specific counts/stats + Content context. 
-   (e.g., "How many messages did John send and what is his communication style?", "Count the messages about 'sushi' and summarize them").
-6. "general": Greetings, identity questions.
+### SYSTEM METADATA
+- SQL Data Ready: {sql_ready} (Boolean)
+- Embeddings Ready: {embeddings_ready} (Boolean)
+- Dashboard Ready: {dashboard_ready} (Boolean)
 
-User Question: {question}
+### DASHBOARD CONTENTS (Pre-calculated Metrics)
+If the user asks for these specific metrics, route to `analytics_dashboard`:
+{dashboard_capabilities}
 
-Output JSON:
+### INTENT DEFINITIONS
+1. **analytics_dashboard**: 
+   - Use for **Global Totals** (e.g., "How many participants?", "Total messages?").
+   - Use for **Trends** (e.g., "Activity over time", "Who talks the most?", "Peak activity days").
+   - Use for **Sentiment Summaries** (e.g., "Is the chat positive?", "Sentiment trends").
+
+2. **sql_agent**: 
+   - Use for **Filtered Counts** (e.g., "How many times did X say Y?", "Messages sent after 10 PM").
+   - Use for **Specific Comparisons** not found in the dashboard.
+   - *Requires SQL Data Ready*.
+
+3. **vector_search**: 
+   - Content retrieval (What did we say about X? Find messages about Y).
+   - *Requires Embeddings Ready*.
+
+4. **hybrid_query**: 
+   - Complex questions needing BOTH stats and specific message context.
+   - Example: "Who sent the most messages and what did they say?"
+   - *Requires SQL Data Ready*.
+
+5. **general**: Greetings, help requests, system questions.
+
+6. **system_not_ready**: 
+   - Trigger ONLY if the user asks for a specific data source that is `False`.
+
+### OUTPUT FORMAT
+Return strictly a JSON object, no markdown: {{"intent": "intent_name"}}
+
+### USER QUERY
+{question}
 """
 
-HYBRID_RESPONSE_SYSTEM = """
-You are a Smart Analyst. 
-I have provided two sources of information to answer the user's question:
-1. DASHBOARD STATS: High-level metrics (activity, sentiment counts).
-2. MESSAGE CONTEXT (RAG): Semantic search results from the chat history.
+SQL_GENERATION_PROMPT = f"""
+You are a PostgreSQL Data Engineer. Generate a safe, read-only SQL query for the user question.
 
-INSTRUCTIONS:
-- Synthesize an answer that combines the hard numbers from the Stats with the qualitative details from the Context.
-- If the Stats contradict the Context, prioritize the Stats for numbers and Context for meaning.
-
-CITATION RULES:
-1. **ONLY** cite the specific RAG documents used for context. Format: [source_table:id] (e.g., [messages:123], [segments:456]).
-2. **NEVER** cite the "DASHBOARD", "STATS", or "JSON" as a source. The stats are facts, not clickable references.
-"""
-
-SQL_GENERATION_SYSTEM = f"""
-You are a PostgreSQL Expert specializing in Chat Analytics.
-Your goal is to convert User Questions into SQL queries using the schema below.
-
-Context:
+### SCHEMA
 {DB_SCHEMA_CONTEXT}
 
-CRITICAL RULES:
-1. **Security:** EVERY query MUST filter by `chat_id = :chat_id` in the `WHERE` clause.
-2. **Performance:** - ALWAYS use `LIMIT` for queries returning lists (Max 10 rows).
-3. **Scope:** - IF the user asks for aggregations (count, average, max, min), dates, sentiment stats, or specific sender activity -> Generate SQL.
-   - IF the question is **HYBRID** (asks for stats AND meaning): **IGNORE** the meaning/qualitative part and generate SQL for the stats part.
-   - IF the question is **PURELY** about "meaning", "summary", "topic", "context", or "what was said" (with no countable stats) -> Return exactly: "REFUSE".
-4. **Format:** Return ONLY the raw SQL string. Do not use Markdown (```). Do not explain.
-5. **Joins:** - Use explicit JOINs. 
-   - Join `participants` only if filtering by sender name.
-   - Join `message_sentiments` only if filtering/averaging sentiment.
-6. **Names:** When filtering by `p.name`, use `ILIKE` for case-insensitivity.
+### CRITICAL RULES
+1. **Security:** ALWAYS filter by `chat_id = :chat_id`.
+2. **Safety:** SELECT only. No UPDATE/DELETE/DROP.
+3. **Limit:** AUTOMATICALLY append `LIMIT 10` to any query returning raw rows (not needed for COUNT/AVG).
+4. **Scope:** - If the question asks for "meaning", "summary", or "topic" (uncountable qualitative data), set `valid_sql` to false.
+   - If the question is about numbers, dates, counts, or specific rankings, set `valid_sql` to true.
+5. **Text Matching:** ALWAYS use `ILIKE` for name or content comparisons to ensure case-insensitivity (e.g., `name ILIKE 'john'`).
 
-Examples:
-Q: "How many messages sent by John?"
-A: SELECT COUNT(*) FROM messages m JOIN participants p ON m.participant_id = p.id WHERE m.chat_id = :chat_id AND p.name ILIKE '%John%'
+### OUTPUT FORMAT (JSON)
+{{{{
+    "valid_sql": boolean,
+    "sql": "SELECT ...", 
+    "reasoning": "Brief explanation of why SQL applies or not."
+}}}}
 
-Q: "Who is the most negative person?"
-A: SELECT p.name, AVG(s.score_negative) as neg_score FROM participants p JOIN messages m ON p.id = m.participant_id JOIN message_sentiments s ON m.id = s.message_id WHERE m.chat_id = :chat_id GROUP BY p.name ORDER BY neg_score DESC LIMIT 1
-
-Q: "How many messages did John send and what is he talking about?"
-A: SELECT COUNT(*) FROM messages m JOIN participants p ON m.participant_id = p.id WHERE m.chat_id = :chat_id AND p.name ILIKE '%John%'
-
-Q: "What were they arguing about?"
-A: REFUSE
-
-User Question: {{question}}
+### USER QUERY
+{{question}}
 """
 
-SQL_RESPONSE_SYSTEM = """
-You are a helpful Data Analyst Assistant. 
-You have just executed a SQL query to answer the user's question regarding their chat history.
+MASTER_SYSTEM_PROMPT = """
+### IDENTITY & PURPOSE
+You are SentimentScope, an intelligent AI analyst for WhatsApp chat logs. 
+Your goal is to provide insightful, data-driven answers about the user's conversation history.
+Your tone is helpful, professional, and conversational. You are NOT a robot debugging a script.
 
-User Question: {question}
-SQL Query Result: {sql_result}
+### CURRENT SYSTEM STATE
+[CRITICAL: Read this first to understand what data you have access to]
+- Embedding Status: {embedding_status} (e.g., "completed", "processing", "pending", "failed")
+- Data Available: {data_sources_available} (List)
 
-Instructions:
-1. Synthesize the result into a clear, natural sentence.
-2. Round decimal numbers to 2 places (e.g., sentiment scores).
-3. If the result is empty or 0, politely inform the user no data matched.
-4. Do not mention "SQL", "Database", or "Query ID". Just answer the question directly.
+### INPUT DATA STREAMS
+You have been provided with the following data streams. If a stream is "None" or "Empty", ignore it.
 
-Example Input: [(15, 'positive')]
-Example Output: "There were 15 messages classified as positive."
+1. **QUANTITATIVE DATA (SQL/Dashboard Stats):**
+   *Use this for exact counts, dates, and hard numbers.*
+   {structured_data}
+
+2. **QUALITATIVE CONTEXT (Vector Search/RAG):**
+   *Use this for "who said what", specific topics, tone, and context.*
+   {rag_context}
+
+### RESPONSE GUIDELINES
+
+#### 1. HANDLING "NO DATA" SCENARIOS (Anti-Hallucination)
+- If `rag_context` is empty/null: 
+  - **Check `Embedding Status`**:
+    - If "processing" or "pending": "I am currently processing the chat content for search. I can't look up specific topics yet, but I might be able to answer statistical questions."
+    - If "completed" or "failed": "I couldn't find any specific messages matching that topic in your chat history."
+  - Do **NOT** invent a citation like `[source_table:1]`.
+
+#### 2. CITATION PROTOCOL (Strict)
+- **Rule:** You must cite the specific message used for context.
+- **Format:** Use `[source_table:id]` (e.g., `[messages:153]`, `[segments_sender:45]`).
+- **Restriction:** - NEVER cite the SQL data, Dashboard, or System State. 
+  - Only cite when you are quoting or summarizing a specific chunk from `rag_context`.
+
+#### 3. SYNTHESIS (Hybrid Logic)
+- If you have BOTH `structured_data` and `rag_context`:
+  - Start with the hard facts (SQL/Stats).
+  - Follow up with the context/examples (RAG).
+
+### USER QUERY
+{question}
 """
 
-ANALYTICS_SYSTEM = """
-You are a Data Analyst. Answer using ONLY the provided JSON dashboard data.
-Refuse to hallucinate. If the data isn't there, say so.
-Refer to the data naturally (e.g., "The charts show..."). Do not mention "JSON".
-"""
-
-RAG_SYSTEM = """
-You are a Chat Historian. Answer using the provided CONTEXT snippets.
-Cite sources as [source_table:id].
-
-CRITICAL CONSTRAINTS TO EXPLAIN TO USER IF RELEVANT:
-- If the user asks for very old messages, remind them we only keep 24 months of history.
-- If the user asks for short replies (e.g. "Did I say ok?"), remind them we filter out messages under 4 words.
-
-Context:
-{context}
-"""
-
-HYBRID_SQL_RESPONSE_SYSTEM = """
-You are a Smart Analyst. 
-I have provided two sources of information to answer the user's question:
-1. PRECISE STATS (SQL): Exact numbers/lists from the database.
-2. MESSAGE CONTEXT (RAG): Semantic search results from the chat history.
-
-INSTRUCTIONS:
-- Synthesize an answer that combines the exact numbers from SQL with the qualitative details from RAG.
-- Use the SQL result for factual counts/lists (e.g., "John sent 183 messages").
-- Use the Context for style, tone, and content summary.
-
-CITATION RULES:
-1. **ONLY** cite the specific RAG documents used for context. Format: [source_table:id] (e.g., [messages:123], [segments:456]).
-2. **NEVER** cite the "SQL", "STATS", or "DATABASE" as a source. The stats are facts, not clickable references.
-"""
-
-
-# # --- 3. Chains ---
-# classifier_chain = (
-#     ChatPromptTemplate.from_template(CLASSIFIER_SYSTEM)
-#     | router_llm
-#     | StrOutputParser()
-# )
-
-# --- 4. Logic ---
-
-# Tier 1: Regex Trap
+# Regex Trap
 GREETING_PATTERNS = [
     r"^(hi|hello|hey|sup|greetings)\b",
     r"^who are you",
@@ -253,8 +237,41 @@ def _check_fast_trap(query: str) -> str | None:
     q = query.strip().lower()
     for p in GREETING_PATTERNS:
         if re.search(p, q):
-            return "Hello! I analyze your chat history. Ask me about statistics (e.g., 'Who talks the most?') or search for specific topics (e.g., 'What did we say about sushi?')."
+            return "Hello! I am SentimentScope's intelligent AI analyst for your chat history. Ask me about statistics (e.g., 'Who talks the most?') or search for specific topics (e.g., 'What did we say about pizza?')."
     return None
+
+
+def _get_dashboard_capabilities(analytics_json: Dict[str, Any] | None) -> str:
+    if not analytics_json:
+        return "caps:none"
+
+    caps = ["caps:"]
+
+    gen = analytics_json.get("general_dashboard")
+    if gen:
+        if gen.get("participants") is not None: caps.append("G:p")
+        if gen.get("participantCount") is not None: caps.append("G:c")
+        if gen.get("kpiMetrics"): caps.append("G:kpi")
+        if gen.get("messagesOverTime"): caps.append("G:ts")
+        if gen.get("activityByDay"): caps.append("G:day")
+        if gen.get("hourlyActivity"): caps.append("G:hour")
+        if gen.get("contribution"): caps.append("G:ctr")
+        if gen.get("activity"): caps.append("G:radar")
+        if gen.get("timeline"): caps.append("G:tl")
+
+    sent = analytics_json.get("sentiment_dashboard")
+    if sent:
+        if sent.get("kpiData"): caps.append("S:kpi")
+        if sent.get("trendData"): caps.append("S:trend")
+        if sent.get("breakdownData"): caps.append("S:brk")
+        if sent.get("dayData"): caps.append("S:day")
+        if sent.get("hourData"): caps.append("S:hour")
+        if sent.get("highlightsData"): caps.append("S:hl")
+
+    return " ".join(caps) if len(caps) > 1 else "caps:none"
+
+
+
 
 async def validate_sql_safety(sql: str) -> str:
     """
@@ -264,29 +281,24 @@ async def validate_sql_safety(sql: str) -> str:
     normalized_sql = sql.strip().strip(';').replace('\n', ' ')
     upper_sql = normalized_sql.upper()
 
-    # 1. Destructive Command Check
+    # Destructive Command Check
     for keyword in FORBIDDEN_KEYWORDS:
-        # Regex checks for whole word matches to avoid false positives (e.g., "UPDATE" in "UPDATED_AT")
         if re.search(r'\b' + keyword + r'\b', upper_sql):
             raise ValueError(f"Security Alert: Query contains forbidden keyword '{keyword}'")
-
-    # 2. Table Access Control (Allow-list approach is safer, but Block-list is easier here)
+    # Forbidden Table Check
     for table in FORBIDDEN_TABLES:
         if re.search(r'\b' + table + r'\b', sql.lower()):
              raise ValueError(f"Security Alert: Access to restricted table '{table}' is denied.")
 
-    # 3. Scope Enforcement (Must use bound parameter)
+    # Scope Enforcement
     if ":chat_id" not in sql:
         raise ValueError("Security Alert: Query failed to bind 'chat_id' parameter.")
 
-    # 4. Performance Governor (Auto-Limit)
-    # If LIMIT is missing, append it. 
+    # Performance Governor (Auto-Limit)
     if "LIMIT" not in upper_sql:
         normalized_sql += " LIMIT 20"
         log.warning("[SQL Agent] LLM forgot LIMIT. Injected 'LIMIT 20'.")
     else:
-        # Optional: Regex to cap existing limits (e.g., change LIMIT 1000 to LIMIT 50)
-        # This is complex to do reliably with Regex alone, keeping it simple for now.
         pass
 
     return normalized_sql
@@ -298,101 +310,85 @@ async def generate_and_execute_sql(
     Agents sub-routine: Generates SQL, validates safety, executes, and returns raw results.
     """
     try:
-        # --- 1. Generate SQL ---
-        prompt = ChatPromptTemplate.from_template(SQL_GENERATION_SYSTEM)
+        prompt = ChatPromptTemplate.from_template(SQL_GENERATION_PROMPT)
         chain = prompt | main_llm | StrOutputParser()
-        
-        # Ainvoke with the user query
         raw_response = await chain.ainvoke({"question": query})
-        log.info(f"[SQL Agent] Generated Raw SQL: {raw_response}")
-        # Basic string cleanup
-        cleaned_response = raw_response.strip()
-        cleaned_response = re.sub(r'```sql', '', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = cleaned_response.replace('```', '').strip()
-
-        # Check for refusal *before* safety checks
-        if "REFUSE" in cleaned_response:
-            return "REFUSE" # Handle this upstream to trigger Vector Search
-
-        log.info(f"[SQL Agent] Generated Raw: {cleaned_response}")
-
-        # --- 2. High-End Safety Layer ---
+        
+        cleaned_json = raw_response.strip().replace('```json', '').replace('```', '')
+        
         try:
-            safe_sql = await validate_sql_safety(cleaned_response)
-        except ValueError as e:
-            log.warning(f"[SQL Agent] blocked malicious/unsafe query: {e}")
-            return "I cannot execute this query due to safety constraints."
+            parsed = json.loads(cleaned_json)
+        except json.JSONDecodeError:
+            log.warning(f"[SQL Agent] Failed to parse JSON: {raw_response}")
+            return "REFUSE"
 
-        # --- 3. Execute SQL (Safe Read-Only) ---
+        if not parsed.get("valid_sql", False):
+            return "REFUSE"
+
+        sql_query = parsed.get("sql", "")
+        log.info(f"[SQL Agent] Generated: {sql_query}")
+
+        safe_sql = await validate_sql_safety(sql_query)
+
         stmt = text(safe_sql)
-        
-        # Execute using the session
         result = await db.execute(stmt, {"chat_id": chat_id})
-        
-        # Convert to list of dicts for cleaner formatting usually, or just tuples
         rows = result.fetchall()
         
         if not rows:
             return "No data found matching the criteria."
         
-        # Convert rows (tuples) to string for the LLM to synthesize
-        # Truncate if somehow we got too many rows despite LIMIT
         return str(rows[:20])
 
     except ProgrammingError as e:
-        # Caused by: Syntax errors, missing columns, bad table names (LLM Hallucinations)
-        # Action: Critical to rollback.
         await db.rollback()
         
-        # Log the specific Postgres error code/message for debugging prompt engineering
-        # e.orig often contains the raw driver error (e.g., asyncpg)
         error_details = str(e.orig) if hasattr(e, 'orig') else str(e)
         log.warning(f"[SQL Agent] Bad SQL generated. Query: {safe_sql} | Error: {error_details}")
         
-        return "I tried to query the database, but the generated SQL was invalid. (Syntax Error)"
-
+        return "REFUSE"
     except OperationalError as e:
-        # Caused by: Timeouts, DB connection loss, server restart
-        # Action: Rollback and alert infrastructure issues.
         await db.rollback()
         log.error(f"[SQL Agent] DB Operational Error (Connection/Timeout): {e}")
-        return "The database is currently unreachable or timed out."
+        return "REFUSE"
 
     except DataError as e:
-        # Caused by: Division by zero, numeric overflow, invalid input syntax for types
-        # Action: Rollback.
         await db.rollback()
         log.warning(f"[SQL Agent] Data processing error: {e}")
-        return "The query attempted an invalid mathematical operation or data conversion."
+        return "REFUSE"
 
     except SQLAlchemyError as e:
         # Catch-all for other DB errors
         await db.rollback()
         log.error(f"[SQL Agent] Generic DB Error: {e}")
-        return "An unexpected database error occurred."
+        return "REFUSE"
 
     except Exception as e:
-        # Non-DB errors (e.g., Python logic, memory issues)
-        # Note: If the session was active, we should still try to rollback just in case.
+        # Non-DB errors 
         try:
             await db.rollback()
         except:
-            pass # Session might be closed already
+            pass 
             
         log.critical(f"[SQL Agent] Critical Python Error: {e}", exc_info=True)
-        return "I encountered a system error while processing the data."
+        return "REFUSE"
 
 async def run_vector_search(query: str, chat_id: int):
     docs = await retriever.aget_relevant_documents(query, chat_id)
+    
+    if not docs:
+        
+        return [], [], None 
+        
     sources_list = [
         {"source_table": s.source_table, "source_id": s.source_id, "distance": s.distance, "text": s.text} 
         for s in docs
     ]
+    
     context_text = "\n\n".join([f"[{d.source_table}:{d.source_id}] {d.text}" for d in docs])
-    if not context_text:
-        context_text = "No relevant messages found (checked last 24 months)."
     
     return docs, sources_list, context_text
+
+
 
 async def route_and_process(
     query: str, 
@@ -405,17 +401,12 @@ async def route_and_process(
     The Main Entry Point. Yields chunks of the answer (SSE format).
     Final yield is the structured JSON with metadata (RagQueryResponse).
     """
-    
-    # 1. Tier 1: Fast Trap
     fast_response = _check_fast_trap(query)
     if fast_response:
-        # A. Stream the content immediately
         yield f"data: {json.dumps(fast_response)}\n\n"
-        
-        # B. [FIX] Persist the interaction to DB
+    
         await _save_turn(db, chat_id, query, fast_response, [])
 
-        # C. Stream final payload with metadata
         final_payload = {"answer": fast_response, "route": "TIER_1_FAST", "sources": []}
         yield f"data: {json.dumps(final_payload)}\n\n"
         return
@@ -427,165 +418,97 @@ async def route_and_process(
                 "chat_history": chat_history,
                 "question": query
             })
-            log.info(f"Contextualized: '{query}' -> '{standalone_question}'")
         except Exception as e:
             log.error(f"Contextualization failed: {e}")
+    
 
-    intent = "vector_search"  # Default intent
+    status_str = await crud.get_chat_embedding_status(db, chat_id)
+    
+    is_sql_ready = (status_str is not None)
+    has_dashboard = analytics_json is not None
+    is_embeddings_ready = (status_str == EmbeddingStatusEnum.completed.value)
+    
+    dashboard_caps = _get_dashboard_capabilities(analytics_json)
+
+    intent = "vector_search"
     try:
-        raw_class = await (
-            ChatPromptTemplate.from_template(CLASSIFIER_SYSTEM) | router_llm | StrOutputParser()
-        ).ainvoke({"question": standalone_question })
-        parsed = json.loads(raw_class.strip())
-        log.info(f"Classifier Raw Output: {raw_class}") 
-        intent = parsed.get("intent", "vector_search")
-    except Exception as e:
-        log.warning(f"Intent classification failed or produced invalid JSON. Defaulting to 'vector_search'. Error: {e}")
+        router_input = {
+            "question": standalone_question,
+            "sql_ready": is_sql_ready,
+            "embeddings_ready": is_embeddings_ready,
+            "dashboard_ready": has_dashboard,
+            "dashboard_capabilities": dashboard_caps # Inject guidance
+        }
         
+        raw_class = await (
+            ChatPromptTemplate.from_template(ROUTER_SYSTEM_PROMPT) | router_llm | StrOutputParser()
+        ).ainvoke(router_input)
+        
+        # Strip Markdown to fix the "Router failed: Expecting value" error
+        cleaned_router = raw_class.strip().replace('```json', '').replace('```', '')
+        parsed_intent = json.loads(cleaned_router)
+        intent = parsed_intent.get("intent", "vector_search")
 
-    log.info(f"Router Decision: {intent}")
+
+    except Exception as e:
+        log.warning(f"Router failed: {e}")
+
+        if is_embeddings_ready:
+            intent = "vector_search"
+        elif is_sql_ready:
+            intent = "sql_agent"
+        else:
+            intent = "system_not_ready"
+
+    log.info(f"Router Decision: {intent} (SQL: {is_sql_ready}, Embeddings: {is_embeddings_ready})")
 
     answer_accum = ""
     sources_list = []
     
-    # 3. Tier 3: Handlers
+    structured_data = "None"
+    rag_context = None
+    
+    
     try:
-        # --- A. Hybrid Dashboard (Macro Stats + Context) ---
-        if intent == "hybrid_dashboard":
-            stats_str = serialize_analytics(analytics_json)
-            _, sources_list, context_text = await run_vector_search(standalone_question, chat_id)
-            
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", HYBRID_RESPONSE_SYSTEM),
-                ("human", "STATS:\n{stats_str}\n\nCONTEXT:\n{context_text}\n\nQuestion: {question}")
-            ])
-            
-            chain = prompt | main_llm | StrOutputParser()
-            
-            async for chunk in chain.astream({
-                "stats_str": stats_str,
-                "context_text": context_text,
-                "question": standalone_question
-            }):
-                answer_accum += chunk
-                yield f"data: {json.dumps(chunk)}\n\n"
+        if intent == "system_not_ready":
+             pass 
 
-        # --- B. Hybrid SQL (Micro Stats + Context) [NEW] ---
-        elif intent == "hybrid_sql":
-            # 1. Run SQL (Micro Stats)
-            sql_result = await generate_and_execute_sql(standalone_question, chat_id, db)
-            log.info(f"[Hybrid SQL] SQL Result: {sql_result}")
-            # 2. Run Vector Search (Context)
-            _, sources_list, context_text = await run_vector_search(standalone_question, chat_id)
+        if intent in ["analytics_dashboard", "hybrid_query"] and has_dashboard:
+            structured_data = f"DASHBOARD STATS:\n{serialize_analytics(analytics_json)}"
             
-            # 3. Synthesize
-            # If SQL failed/refused, we still try to answer best effort, or fallback to standard RAG
-            if sql_result == "REFUSE":
-                 # Fallback to standard RAG if SQL refuses (unlikely given classification, but safe)
-                 prompt = ChatPromptTemplate.from_messages([
-                    ("system", RAG_SYSTEM), 
-                    ("human", "Question: {question}")
-                ])
-                 chain = prompt | main_llm | StrOutputParser()
-                 async for chunk in chain.astream({"context": context_text, "question": standalone_question}):
-                    answer_accum += chunk
-                    yield f"data: {json.dumps(chunk)}\n\n"
-            else:
-                prompt = ChatPromptTemplate.from_messages([
-                    ("system", HYBRID_SQL_RESPONSE_SYSTEM),
-                    ("human", "SQL RESULT: {sql_result}\n\nCONTEXT:\n{context_text}\n\nQuestion: {question}")
-                ])
-                
-                chain = prompt | main_llm | StrOutputParser()
-                
-                async for chunk in chain.astream({
-                    "sql_result": sql_result,
-                    "context_text": context_text,
-                    "question": standalone_question
-                }):
-                    answer_accum += chunk
-                    yield f"data: {json.dumps(chunk)}\n\n"
+        if intent in ["sql_agent", "hybrid_query"] and is_sql_ready:
+            sql_res = await generate_and_execute_sql(standalone_question, chat_id, db)
+            if sql_res != "REFUSE":
+                if structured_data == "None":
+                    structured_data = f"SQL RESULT: {sql_res}"
+                else:
+                    structured_data += f"\n\nSQL RESULT: {sql_res}"
 
-        elif intent == "sql_agent":
-            # 1. Generate & Run SQL
-            sql_result = await generate_and_execute_sql(standalone_question, chat_id, db)
-            log.info(f"[SQL Agent] SQL Result: {sql_result}")
-            # 2. Synthesize Answer
-            if sql_result == "REFUSE":
-                log.info("[SQL Agent] Refused query. Falling back to Vector Search.")
-                intent = "vector_search" # Update intent for logging/metadata
-                
-                # Fallback logic
-                docs, sources_list, context_text = await run_vector_search(standalone_question, chat_id)
-                prompt = ChatPromptTemplate.from_messages([
-                    ("system", RAG_SYSTEM),
-                    ("human", f"Question: {standalone_question}\n\nContext:\n{context_text}")
-                ])
-                chain = prompt | main_llm | StrOutputParser()
-                async for chunk in chain.astream({
-                    "context": context_text,
-                    "question": standalone_question
-                }):
-                    answer_accum += chunk
-                    yield f"data: {json.dumps(chunk)}\n\n"
-            else:
-                # Normal SQL Response
-                prompt = ChatPromptTemplate.from_template(SQL_RESPONSE_SYSTEM)
-                chain = prompt | main_llm | StrOutputParser()
-                
-                async for chunk in chain.astream({"sql_result": sql_result, "question": standalone_question}):
-                    answer_accum += chunk
-                    yield f"data: {json.dumps(chunk)}\n\n"
-
-        elif intent == "analytics_dashboard":
-            if not analytics_json:
-                full_resp = "I need dashboard stats to answer that, but they aren't loaded."
-                yield f"data: {json.dumps(full_resp)}\n\n"
-                final_resp = {"answer": full_resp, "route": intent.upper(), "sources": []}
-                yield f"data: {json.dumps(final_resp)}\n\n"
-                return
-
-            data_str = serialize_analytics(analytics_json)
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", ANALYTICS_SYSTEM),
-                ("human", "Data: {data_str}\n\nQuestion: {question}"),
-            ])
+        if intent in ["vector_search", "hybrid_query", "sql_agent", "general"] and is_embeddings_ready:
+            _, sources_list, rag_context = await run_vector_search(standalone_question, chat_id)
             
-            chain = prompt | main_llm | StrOutputParser()
-            async for chunk in chain.astream({
-                "data_str": data_str,
-                "question": standalone_question
-            }):
-                answer_accum += chunk
-                yield f"data: {json.dumps(chunk)}\n\n"
+        prompt_inputs = {
+            "has_file": is_sql_ready, 
+            "embedding_status": status_str if status_str else "unknown", 
+            "data_sources_available": [k for k, v in [("SQL/Stats", structured_data != "None"), ("RAG", rag_context is not None)] if v],
+            "structured_data": structured_data,
+            "rag_context": rag_context if rag_context else "", 
+            "question": standalone_question
+        }
+        
+        chain = (
+            ChatPromptTemplate.from_template(MASTER_SYSTEM_PROMPT) 
+            | main_llm 
+            | StrOutputParser()
+        )
 
-        elif intent == "vector_search":
-            _, sources_list, context_text = await run_vector_search(standalone_question, chat_id)
-
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", RAG_SYSTEM), # RAG_SYSTEM has {context} placeholder
-                ("human", "Question: {question}")
-            ])
-            
-            chain = prompt | main_llm | StrOutputParser()
-            async for chunk in chain.astream({
-                "context": context_text,
-                "question": standalone_question
-            }):
-                answer_accum += chunk
-                yield f"data: {json.dumps(chunk)}\n\n"
-        else:
-            chain = (
-                ChatPromptTemplate.from_template("Answer politely: {question}") 
-                | main_llm 
-                | StrOutputParser()
-            )
-            async for chunk in chain.astream({"question": standalone_question}):
-                answer_accum += chunk
-                yield f"data: {json.dumps(chunk)}\n\n"
+        async for chunk in chain.astream(prompt_inputs):
+            answer_accum += chunk
+            yield f"data: {json.dumps(chunk)}\n\n"
 
         if answer_accum:
             await _save_turn(db, chat_id, query, answer_accum, sources_list)
+            
         final_resp = {
             "answer": answer_accum,
             "route": intent.upper(),

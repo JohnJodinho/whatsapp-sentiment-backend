@@ -12,6 +12,11 @@ class SentimentStatusEnum(str, enum.Enum):
     failed = "failed"
     cancelled = "cancelled" # <-- ADD THIS
 
+class EmbeddingStatusEnum(str, enum.Enum):
+    pending = "pending"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
 class ParticipantBase(BaseModel):
     name: str
 

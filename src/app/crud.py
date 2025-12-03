@@ -57,6 +57,8 @@ async def delete_chat(db: AsyncSession, chat_id: int, should_commit: bool = True
         return True
     return False
 
+
+
 async def request_chat_cancel(db: AsyncSession, chat_id: int) -> bool:
     result = await db.execute(select(models.Chat).filter(models.Chat.id == chat_id))
     chat = result.scalars().first()
@@ -79,7 +81,24 @@ async def update_chat_status(db: AsyncSession, chat_id: int, status: str):
         db.add(chat)
         await db.commit()
 
+async def update_chat_embedding_status(db: AsyncSession, chat_id: int, status: str, should_commit: bool = True):
+    chat = await get_chat(db, chat_id)
+    if chat:
+        chat.embeddings_status = status
+        db.add(chat)
+        if should_commit:
+            await db.commit()
 
+
+async def get_chat_embedding_status(db: AsyncSession, chat_id: int) -> Optional[str]:
+    """
+    Quickly get just the embeddings_status of a chat.
+    """
+    result = await db.execute(
+        select(models.Chat.embeddings_status)
+        .where(models.Chat.id == chat_id)
+    )
+    return result.scalar_one_or_none()
 
 async def get_chat_status(db: AsyncSession, chat_id: int) -> Optional[str]:
     """
@@ -118,6 +137,44 @@ async def add_conversation_turn(
     ai_msg = models.ConversationHistory(chat_id=chat_id, role="assistant", content=ai_a, sources=sources)
     db.add_all([user_msg, ai_msg])
     await db.commit()
+
+async def get_messages_batch(
+    db: AsyncSession,
+    chat_id: int,
+    limit: int,
+    offset: int,
+    min_date: Optional[datetime] = None
+) -> List[models.Message]:
+    """
+    Fetches a batch of messages for a chat with optional filtering by minimum date.
+    """
+    stmt = (
+        select(models.Message)
+        .where(models.Message.chat_id == chat_id)
+    )
+
+    # Optional min timestamp
+    if min_date:
+        stmt = stmt.where(models.Message.timestamp >= min_date)
+
+    # Pagination + ordering
+    stmt = (
+        stmt.order_by(models.Message.timestamp.desc())
+            .limit(limit)
+            .offset(offset)
+    )
+
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+
+
+
+
+
+
+
 
 
 async def clear_conversation_history(db: AsyncSession, chat_id: int):
@@ -242,6 +299,32 @@ async def get_all_sender_segments_for_chat(db: AsyncSession, chat_id: int) -> Li
         .join(models.TimeSegment)
         .where(models.TimeSegment.chat_id == chat_id)
     )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+async def get_segments_batch(
+    db: AsyncSession,
+    chat_id: int,
+    limit: int,
+    offset: int,
+    min_date: Optional[datetime] = None
+) -> List[models.SenderSegment]:
+
+    stmt = (
+        select(models.SenderSegment)
+        .join(models.TimeSegment)
+        .where(models.TimeSegment.chat_id == chat_id)
+    )
+
+    if min_date:
+        stmt = stmt.where(models.TimeSegment.start_time >= min_date)
+
+    stmt = (
+        stmt.order_by(models.TimeSegment.start_time.desc())
+            .limit(limit)
+            .offset(offset)
+    )
+
     result = await db.execute(stmt)
     return result.scalars().all()
 
