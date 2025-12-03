@@ -61,6 +61,21 @@ def get_pipeline():
     """
     global _PIPELINE
     if _PIPELINE is None:
+        # --- DEBUGGING BLOCK START ---
+        model_file = os.path.join(_MODEL_PATH, "model.onnx")
+        if os.path.exists(model_file):
+            size = os.path.getsize(model_file)
+            log.info(f"DEBUG: Found model at {model_file}")
+            log.info(f"DEBUG: File size is {size} bytes")
+            
+            if size < 5000: # If less than 5KB, it's definitely a pointer file
+                with open(model_file, 'r') as f:
+                    content = f.read()
+                log.error(f"CRITICAL: Model file is too small! Content preview: {content}")
+                raise Exception("Model file is a Git LFS pointer, not the actual binary.")
+        else:
+            log.error(f"CRITICAL: Model file not found at {model_file}")
+
         log.info(f"Loading ONNX model from {_MODEL_PATH}...")
         try:
             sess_options = SessionOptions()

@@ -4,8 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 import jwt
 from datetime import datetime, timedelta, timezone
+from src.app.services.cleanup_service import cleanup_expired_user_data
 import uuid
 import logging
+import asyncio
 
 from src.app.config import settings
 from src.app.db.session import get_db
@@ -65,11 +67,9 @@ async def get_current_user(
             
             if expired_user_id:
                 user_uuid = uuid.UUID(expired_user_id)
-    
-                await db.execute(delete(models.User).where(models.User.id == user_uuid))
-                await db.commit()
-                logger.info(f"Cleanup successful: Deleted expired user {user_uuid}")
                 
+                asyncio.create_task(cleanup_expired_user_data(user_uuid))
+                logger.info(f"Cleanup successful: Deleted expired user {user_uuid}")
         except Exception as e:
             
             logger.error(f"Failed to clean up expired user: {e}")
@@ -103,9 +103,8 @@ async def get_current_user_ws(token: str, db: AsyncSession) -> models.User | Non
             unverified = jwt.decode(token, options={"verify_signature": False})
             uid = unverified.get("sub")
             if uid:
-                await db.execute(delete(models.User).where(models.User.id == uuid.UUID(uid)))
-                await db.execute()
-                logger.info(f"WS/SSE Cleanup: Dleted expired user {uid}")
+                user_uuid = uuid.UUID(uid)
+                asyncio.create_task(cleanup_expired_user_data(user_uuid))
         except Exception:
             pass
         return 
