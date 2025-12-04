@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, AsyncGenerator
 
 from qdrant_client import AsyncQdrantClient, models as qmodels
+from sqlalchemy.pool import NullPool
 from src.app.config import settings
 from src.app.services.sentiment_worker import celery_app
 from src.app.db.session import AsyncSessionLocal
@@ -26,19 +27,17 @@ DB_BATCH_SIZE = 1000
 MAX_CONCURRENT_EMBEDS = 5
 EMBED_BATCH_SIZE = 100
 
-_qdrant_client: AsyncQdrantClient | None = None
 
-
-def get_qdrant_client() -> AsyncQdrantClient:
-    global _qdrant_client
-    if _qdrant_client is None:
-        _qdrant_client = AsyncQdrantClient(
-            url=str(settings.QDRANT_URL),
-            api_key=settings.QDRANT_API_KEY,
-            timeout=60.0,
-            prefer_grpc=True # Enable gRPC for better performance if supported
-        )
-    return _qdrant_client
+# def get_qdrant_client() -> AsyncQdrantClient:
+#     global _qdrant_client
+#     if _qdrant_client is None:
+#         _qdrant_client = AsyncQdrantClient(
+#             url=str(settings.QDRANT_URL),
+#             api_key=settings.QDRANT_API_KEY,
+#             timeout=60.0,
+#             prefer_grpc=True # Enable gRPC for better performance if supported
+#         )
+#     return _qdrant_client
 
 
 
@@ -78,8 +77,13 @@ def generate_embeddings_task(self, chat_id: int):
 
 
 async def process_chat_ingestion(chat_id: int):
-    client = get_qdrant_client()
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_EMBEDS)
+    client = AsyncQdrantClient(
+        url=str(settings.QDRANT_URL),
+        api_key=settings.QDRANT_API_KEY,
+        timeout = 60.0,
+        prefer_grpc=True
+    )
+
     
     try:
         await _ensure_collection_exists(client)
@@ -112,9 +116,9 @@ async def process_chat_ingestion(chat_id: int):
             
             async for batch in data_stream_generator(db, chat_id, cutoff_date, quota):
                 # Process a batch of text (e.g., 100 items)
-                async with semaphore:
-                    processed_count = await process_and_upload_batch(client, batch, chat_id)
-                    total_ingested += processed_count
+                
+                processed_count = await process_and_upload_batch(client, batch, chat_id)
+                total_ingested += processed_count
                 
                 # Check quota mid-stream to stop early if we hit the limit
                 quota -= processed_count
@@ -134,6 +138,8 @@ async def process_chat_ingestion(chat_id: int):
                 db, chat_id, schemas.EmbeddingStatusEnum.failed.value, should_commit=True
             )
         raise e
+    finally:
+        await client.close()
 
 
 async def data_stream_generator(db, chat_id: int, cutoff_date: datetime, max_items: int) -> AsyncGenerator[List[Dict], None]:

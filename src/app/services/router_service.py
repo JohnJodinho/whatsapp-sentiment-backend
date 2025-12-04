@@ -41,7 +41,7 @@ main_llm = AzureChatOpenAI(
     azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_ROUTER),
     api_key=settings.AZURE_OPENAI_API_KEY_ROUTER,
     temperature=0.2,
-    max_tokens=800
+    max_tokens=3000
 )
 
 FORBIDDEN_KEYWORDS = {
@@ -474,8 +474,12 @@ async def route_and_process(
              pass 
 
         if intent in ["analytics_dashboard", "hybrid_query"] and has_dashboard:
-            structured_data = f"DASHBOARD STATS:\n{serialize_analytics(analytics_json)}"
+            raw_stats = serialize_analytics(analytics_json)
             
+            if len(raw_stats) > 15000:
+                raw_stats = raw_stats[:15000] + "... [TRUNCATED DUE TO SIZE]"
+            
+            structured_data = f"DASHBOARD STATS:\n{raw_stats}"
         if intent in ["sql_agent", "hybrid_query"] and is_sql_ready:
             sql_res = await generate_and_execute_sql(standalone_question, chat_id, db)
             if sql_res != "REFUSE":

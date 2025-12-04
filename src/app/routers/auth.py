@@ -6,7 +6,7 @@ import jwt
 from src.app.config import settings
 from src.app.db.session import get_db
 from src.app import models
-from src.app.security import ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
+from src.app.security import ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 
 router = APIRouter()
 
@@ -22,8 +22,8 @@ async def create_guest_session(db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(new_user)
 
-    # 2. Generate JWT
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_DAYS)
+    # 2. GeneratT
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
     # "sub" holds the User UUID
     to_encode = {"sub": str(new_user.id), "exp": expire}

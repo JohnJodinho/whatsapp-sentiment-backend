@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_VERSION_ROUTER: str
 
     SECRET_KEY: str = secrets.token_urlsafe(32)
-    
+    IS_CELERY_WORKER: str = "false"
     CELERY_BROKER_URL: Optional[str] = None
     CELERY_RESULT_BACKEND: Optional[str] = None
     QDRANT_URL: str

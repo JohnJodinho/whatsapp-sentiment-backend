@@ -15,7 +15,7 @@ from src.app import models
 
 # Configuration
 ALGORITHM = settings.JWT_ALGORITHM
-ACCESS_TOKEN_EXPIRE_DAYS = settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS
+ACCESS_TOKEN_EXPIRE_MINUTES = 240
 
 # The URL where the frontend gets the token
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/guest")

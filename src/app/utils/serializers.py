@@ -2,91 +2,103 @@ import json
 from typing import Dict, Any
 
 def serialize_analytics(analytics_json: Dict[str, Any] | None) -> str:
-    """
-    Intelligently summarizes the analytics JSON to maximize 
-    informational density for the LLM while minimizing token cost.
-    """
     if not analytics_json:
         return "null"
-    
-    clean_data = {}
 
-    # --- 1. Process General Dashboard ---
-    # Based on dashboardData.ts structure
-    if "general_dashboard" in analytics_json:
-        gd = analytics_json["general_dashboard"]
-        clean_gd = {}
-        
-        # A. KPIs: Keep label/value, REMOVE sparklines (visual noise)
-        if "kpiMetrics" in gd:
-            clean_gd["kpiMetrics"] = [
-                {k: v for k, v in m.items() if k != "sparkline"} 
-                for m in gd.get("kpiMetrics", [])
+    out = {}
+
+    # ------------------------
+    # GENERAL DASHBOARD DIGEST
+    # ------------------------
+    gd = analytics_json.get("general_dashboard")
+    if gd:
+        digest = {}
+
+        # KPI summary (values only)
+        kpi = gd.get("kpiMetrics") or []
+        digest["kpi"] = {
+            m["label"]: m.get("value")
+            for m in kpi
+        }
+
+        # Contribution: reduce to top 3 names + percentages
+        ctr = gd.get("contribution")
+        if ctr:
+            if ctr.get("type") == "multi":
+                data = ctr["data"]
+                top = sorted(data, key=lambda x: x["messages"], reverse=True)[:3]
+                digest["top_contributors"] = [
+                    {"name": t["name"], "messages": t["messages"]} for t in top
+                ]
+
+            elif ctr.get("type") == "two":
+                a = ctr["data"]["participants"]
+                digest["top_contributors"] = a
+
+            elif ctr.get("type") == "single":
+                digest["top_contributors"] = [ctr["data"]]
+
+        # Activity summary (not raw arrays)
+        act = gd.get("activity")
+        if act:
+            digest["activity_categories"] = act.get("labels")
+            digest["activity_participants"] = [
+                p["name"] for p in act.get("participants", [])
             ]
-            
-        # B. Contribution: Keep fully (Answer "Who sent the most?")
-        if "contribution" in gd:
-            clean_gd["contribution"] = gd["contribution"]
-            
-        # C. Activity: Keep fully (Answer "Who sends links/media?")
-        if "activity" in gd:
-            clean_gd["activity"] = gd["activity"]
-            
-        # D. Timeline: High value, but limit history (last 12 months)
-        #    Removes 'messagesOverTime' as this table provides better summary
-        if "timeline" in gd:
-            # Only keep essential fields from ChatSegmentBase/Multi/Two
-            clean_gd["timeline_summary"] = [
-                {
-                    k: v for k, v in item.items() 
-                    if k in ["month", "totalMessages", "peakDay", "activeParticipants", "mostActive", "conversationBalance"]
+
+        # Timeline: compress to most recent summary only
+        tl = gd.get("timeline")
+        if tl:
+            recent = tl[-1]   # last month is always enough
+            digest["recent_month"] = {
+                "month": recent.get("month"),
+                "totalMessages": recent.get("totalMessages"),
+                "peakDay": recent.get("peakDay"),
+            }
+
+        out["general"] = digest
+
+    # ------------------------
+    # SENTIMENT DASHBOARD DIGEST
+    # ------------------------
+    sd = analytics_json.get("sentiment_dashboard")
+    if sd:
+        sdig = {}
+
+        # KPI
+        if sd.get("kpiData"):
+            k = sd["kpiData"]
+            sdig["overall"] = {
+                "score": k.get("overallScore"),
+                "pos": k.get("positivePercent"),
+                "neg": k.get("negativePercent"),
+                "neu": k.get("neutralPercent"),
+            }
+
+        # Breakdown: top 3 participants only
+        if sd.get("breakdownData"):
+            b = sd["breakdownData"]
+            top = sorted(b, key=lambda x: x["Positive"], reverse=True)[:3]
+            sdig["top_sentiment"] = [
+                {"name": x["name"], "pos": x["Positive"], "neg": x["Negative"]} 
+                for x in top
+            ]
+
+        # Highlights: strip to short summaries
+        hl = sd.get("highlightsData")
+        if hl:
+            def short(msg):
+                text = msg.get("text") or ""
+                return {
+                    "sender": msg.get("sender"),
+                    "score": msg.get("score"),
+                    "snippet": text[:80],  # small, safe
                 }
-                for item in gd.get("timeline", [])[:12] # Top 12 most recent months
-            ]
-            
-        # E. Heatmaps: Keep compact (Answer "When are they active?")
-        if "activityByDay" in gd:
-             # Remove 'fill' color code, keep day/messages
-             clean_gd["activityByDay"] = [
-                 {k: v for k, v in d.items() if k != "fill"}
-                 for d in gd.get("activityByDay", [])
-             ]
-             
-        if "hourlyActivity" in gd:
-             clean_gd["hourlyActivity"] = gd.get("hourlyActivity")
+            sdig["highlights"] = {
+                "pos": [short(m) for m in hl.get("topPositive", [])[:3]],
+                "neg": [short(m) for m in hl.get("topNegative", [])[:3]],
+            }
 
-        clean_data["general"] = clean_gd
+        out["sentiment"] = sdig
 
-    # --- 2. Process Sentiment Dashboard ---
-    # Based on sentimentDashboardData.ts structure
-    if "sentiment_dashboard" in analytics_json:
-        sd = analytics_json["sentiment_dashboard"]
-        clean_sd = {}
-        
-        # A. KPIs: Keep fully
-        if "kpiData" in sd:
-            clean_sd["kpiData"] = sd["kpiData"]
-            
-        # B. Breakdown: Keep fully (Answer "Who is most positive?")
-        if "breakdownData" in sd:
-            clean_sd["breakdownData"] = sd["breakdownData"]
-            
-        # C. Highlights: CRITICAL (Answer "Why is it negative?")
-        if "highlightsData" in sd:
-            clean_sd["highlights"] = sd["highlightsData"]
-            
-        # D. Time/Trend: Remove 'trendData' (too verbose). 
-        #    Keep day/hour aggregates as they are smaller.
-        if "dayData" in sd:
-            clean_sd["dayData"] = sd["dayData"]
-        
-        #    Summarize hourly to just top 3 peaks to save tokens?
-        #    Or keep as is (24 items is manageable). Let's keep as is.
-        if "hourData" in sd:
-            clean_sd["hourData"] = sd["hourData"]
-
-        clean_data["sentiment"] = clean_sd
-
-    # Return the slimmed-down version
-    # separators=(",", ":") removes all whitespace to save tokens
-    return json.dumps(clean_data, separators=(",", ":"))
+    return json.dumps(out, separators=(",", ":"))
