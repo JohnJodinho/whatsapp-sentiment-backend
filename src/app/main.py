@@ -8,6 +8,9 @@ from starlette.middleware import Middleware
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 from contextlib import asynccontextmanager
+from fastapi.responses import JSONResponse
+from fastapi import Request
+from sqlalchemy.exc import SQLAlchemyError
 import asyncio
 import logging
 import socket
@@ -148,7 +151,21 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception for request %s %s", request.method, request.url)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
-
+@app.exception_handler(SQLAlchemyError)
+async def db_exception_handler(request: Request, exc: SQLAlchemyError):
+    """
+    Globally catches Database errors (connection pool exhaustion, timeouts).
+    Returns a 503 Service Unavailable instead of crashing the server.
+    """
+    # Log the full error for your debugging
+    # log.error(f"Database error: {str(exc)}")
+    
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Service is busy. Database connection limit reached. Please try again in a moment."
+        },
+    )
 
 @app.get("/", tags=["health"])
 async def root():

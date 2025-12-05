@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_core.messages import HumanMessage, AIMessage
+from sqlalchemy import select
 from typing import List, Optional
 from src.app.db.session import get_db
 from src.app import crud, models
@@ -21,19 +22,21 @@ async def get_chat_status(
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """
-    Checks the embedding processing status of a chat.
-    Returns: { "status": "pending" | "processing" | "completed" | "failed" }
-    """
-    chat = await crud.get_chat(db, chat_id=chat_id)
-    if not chat or chat.owner_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Chat not found")
+    # Single query to check ownership AND get status at the same time
+    # This prevents double DB hits (one for auth, one for status)
+    query = select(models.Chat.embeddings_status).where(
+        models.Chat.id == chat_id,
+        models.Chat.owner_id == current_user.id
+    )
+    result = await db.execute(query)
+    status = result.scalar_one_or_none()
 
-    # Assuming crud.get_chat_embedding_status(db, chat_id) exists per instructions
-    status = await crud.get_chat_embedding_status(db, chat_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
     
-    # Default to pending if None
-    return JSONResponse(content={"status": status or "pending"})
+    return JSONResponse(content={"status": status})
+
+
 @router.post(
     "/chat/{chat_id}/query/streamed"
 )

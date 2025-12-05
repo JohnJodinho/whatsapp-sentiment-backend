@@ -31,7 +31,8 @@ if IS_CELERY_WORKER:
     engine_args["poolclass"] = NullPool
 else:
     engine_args["pool_size"] = 10
-    engine_args["max_overflow"] = 20
+    engine_args["max_overflow"] = 0
+    engine_args["pool_timeout"] = 30
     engine_args["pool_recycle"] = 3600
 
 engine = create_async_engine(

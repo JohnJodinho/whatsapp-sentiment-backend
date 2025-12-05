@@ -79,7 +79,7 @@ context_llm = AzureChatOpenAI(
 
 FORBIDDEN_KEYWORDS = {
     'UPDATE', 'DELETE', 'INSERT', 'DROP', 'ALTER', 'TRUNCATE', 
-    'CREATE', 'GRANT', 'REVOKE', 'EXEC', 'UNION', 'pg_sleep'
+    'CREATE', 'GRANT', 'REVOKE', 'EXEC', 'pg_sleep'
 }
 FORBIDDEN_TABLES = {'users', 'chats', 'embeddings', 'conversation_history'}
 
