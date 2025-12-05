@@ -9,7 +9,7 @@ from typing import List, Dict, Any, AsyncGenerator
 from qdrant_client import AsyncQdrantClient, models as qmodels
 from sqlalchemy.pool import NullPool
 from src.app.config import settings
-from src.app.services.sentiment_worker import celery_app
+from src.app.celery_app import celery_app
 from src.app.db.session import AsyncSessionLocal
 from src.app import crud, schemas
 
@@ -26,18 +26,6 @@ MIN_WORD_COUNT = 4
 DB_BATCH_SIZE = 1000
 MAX_CONCURRENT_EMBEDS = 5
 EMBED_BATCH_SIZE = 100
-
-
-# def get_qdrant_client() -> AsyncQdrantClient:
-#     global _qdrant_client
-#     if _qdrant_client is None:
-#         _qdrant_client = AsyncQdrantClient(
-#             url=str(settings.QDRANT_URL),
-#             api_key=settings.QDRANT_API_KEY,
-#             timeout=60.0,
-#             prefer_grpc=True # Enable gRPC for better performance if supported
-#         )
-#     return _qdrant_client
 
 
 
@@ -59,22 +47,18 @@ async def _ensure_collection_exists(client: AsyncQdrantClient):
             field_schema=qmodels.PayloadSchemaType.INTEGER
         )
 
-@celery_app.task(name="generate_embeddings", bind=True, acks_late=True)
+@celery_app.task(name="src.app.services.embedding_worker.generate_embeddings_task", bind=True, acks_late=True)
 def generate_embeddings_task(self, chat_id: int):
     """
     Celery task to orchestrate intelligent ingestion into Qdrant.
     """
     try:
         log.info(f"Starting Qdrant Ingestion for Chat {chat_id}")
-       
         asyncio.run(process_chat_ingestion(chat_id))
-        
-        
         log.info(f"✅ Qdrant Ingestion finished for Chat {chat_id}")
     except Exception as e:
         log.error(f"Embedding task failed for Chat {chat_id}: {e}", exc_info=True)
-   
-
+        # Optional: self.retry(exc=e, countdown=60)
 
 async def process_chat_ingestion(chat_id: int):
     client = AsyncQdrantClient(

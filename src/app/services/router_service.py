@@ -2,7 +2,10 @@ import logging
 import re
 import json
 import asyncio
-from typing import Dict, Any, List, AsyncGenerator
+import tiktoken
+from typing import Dict, Any, List, AsyncGenerator, Union
+import random
+from openai import RateLimitError
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
@@ -26,6 +29,9 @@ from src.app import crud
 log = logging.getLogger(__name__)
 
 
+CTX_WINDOW_MAIN_4O = 32000     
+CTX_WINDOW_MAIN_4O_MINI = 8000
+
 router_llm = AzureChatOpenAI(
     azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_ROUTER,
     api_version=settings.AZURE_OPENAI_API_VERSION_ROUTER,
@@ -35,13 +41,40 @@ router_llm = AzureChatOpenAI(
     max_tokens=200
 )
 
-main_llm = AzureChatOpenAI(
-    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_ROUTER, 
-    api_version=settings.AZURE_OPENAI_API_VERSION_ROUTER,
-    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_ROUTER),
-    api_key=settings.AZURE_OPENAI_API_KEY_ROUTER,
+main_llm_primary = AzureChatOpenAI(
+    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_MAIN_4O,
+    api_version=settings.AZURE_OPENAI_API_VERSION_MAIN_4O,
+    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_MAIN_4O),
+    api_key=settings.AZURE_OPENAI_API_KEY_MAIN_4O,
     temperature=0.2,
-    max_tokens=3000
+    streaming=True 
+)
+
+main_llm_fallback = AzureChatOpenAI(
+    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_MAIN_4O_MINI,
+    api_version=settings.AZURE_OPENAI_API_VERSION_MAIN_4O_MINI,
+    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_MAIN_4O_MINI),
+    api_key=settings.AZURE_OPENAI_API_KEY_MAIN_4O_MINI,
+    temperature=0.2,
+    streaming=True
+)
+context_llm_fallback = AzureChatOpenAI(
+    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_CONTEXT_4O,
+    api_version=settings.AZURE_OPENAI_API_VERSION_CONTEXT_4O,
+    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_CONTEXT_4O),
+    api_key=settings.AZURE_OPENAI_API_KEY_CONTEXT_4O,
+    temperature=0.2,
+    max_tokens=500
+)
+
+# Fallback Context LLM (GPT-4 / Smaller model)
+context_llm = AzureChatOpenAI(
+    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_CONTEXT_4,
+    api_version=settings.AZURE_OPENAI_API_VERSION_CONTEXT_4,
+    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_CONTEXT_4),
+    api_key=settings.AZURE_OPENAI_API_KEY_CONTEXT_4,
+    temperature=0.2,
+    max_tokens=500
 )
 
 FORBIDDEN_KEYWORDS = {
@@ -173,7 +206,7 @@ You are a PostgreSQL Data Engineer. Generate a safe, read-only SQL query for the
 {{{{
     "valid_sql": boolean,
     "sql": "SELECT ...", 
-    "reasoning": "Brief explanation of why SQL applies or not."
+    "reasoning": "A concise label for the data being retrieved (e.g. 'Count of messages from John')."
 }}}}
 
 ### USER QUERY
@@ -181,48 +214,38 @@ You are a PostgreSQL Data Engineer. Generate a safe, read-only SQL query for the
 """
 
 MASTER_SYSTEM_PROMPT = """
-### IDENTITY & PURPOSE
-You are SentimentScope, an intelligent AI analyst for WhatsApp chat logs. 
-Your goal is to provide insightful, data-driven answers about the user's conversation history.
-Your tone is helpful, professional, and conversational. You are NOT a robot debugging a script.
+### IDENTITY
+You are SentimentScope, a warm and insightful AI companion analyzing a WhatsApp chat.
+Your goal is to answer the user's questions directly and naturally.
 
-### CURRENT SYSTEM STATE
-[CRITICAL: Read this first to understand what data you have access to]
-- Embedding Status: {embedding_status} (e.g., "completed", "processing", "pending", "failed")
-- Data Available: {data_sources_available} (List)
+### [SESSION_FLOW]
+(Use this recent context to maintain tone and continuity, but DO NOT refer to it explicitly.)
+{chat_context}
 
-### INPUT DATA STREAMS
-You have been provided with the following data streams. If a stream is "None" or "Empty", ignore it.
+### KNOWLEDGE BASE
+[STATISTICS & FACTS]
+{structured_data}
 
-1. **QUANTITATIVE DATA (SQL/Dashboard Stats):**
-   *Use this for exact counts, dates, and hard numbers.*
-   {structured_data}
+[CONVERSATION EXCERPTS]
+{rag_context}
 
-2. **QUALITATIVE CONTEXT (Vector Search/RAG):**
-   *Use this for "who said what", specific topics, tone, and context.*
-   {rag_context}
+### STRICT RESPONSE RULES (ANTI-LEAK)
+1. **Be Direct & Conversational:** - Never explain *how* you found the answer. 
+   - BAD: "Based on the session flow..." or "Looking at the SQL results..."
+   - GOOD: "John sent 182 messages."
 
-### RESPONSE GUIDELINES
+2. **No Technical Jargon:** 
+   - NEVER use words/phrases like: "SQL", "RAG", "Vector Search", "Embeddings", "Database", "Query", "Tuple", "[CONVERSATION EXCERPTS]", "session flow", "knowledge base", "[EXCERPTS]", "[STATISTICS]".
+   - If the data is missing, say: "I'm not sure," or "I don't see that in the history." Do NOT say: "The SQL result is empty."
 
-#### 1. HANDLING "NO DATA" SCENARIOS (Anti-Hallucination)
-- If `rag_context` is empty/null: 
-  - **Check `Embedding Status`**:
-    - If "processing" or "pending": "I am currently processing the chat content for search. I can't look up specific topics yet, but I might be able to answer statistical questions."
-    - If "completed" or "failed": "I couldn't find any specific messages matching that topic in your chat history."
-  - Do **NOT** invent a citation like `[source_table:1]`.
+3. **Handle Discrepancies:**
+   - If [STATISTICS] says "0 messages" but [EXCERPTS] shows John talking, trust the [EXCERPTS] and say: "I see John chatting, but I don't have his exact message count right now."
 
-#### 2. CITATION PROTOCOL (Strict)
-- **Rule:** You must cite the specific message used for context.
-- **Format:** Use `[source_table:id]` (e.g., `[messages:153]`, `[segments_sender:45]`).
-- **Restriction:** - NEVER cite the SQL data, Dashboard, or System State. 
-  - Only cite when you are quoting or summarizing a specific chunk from `rag_context`.
+4. **Citations:**
+   - Only cite specific quotes from [CONVERSATION EXCERPTS] using `[source_table:id]`.
+   - Do not cite statistics.
 
-#### 3. SYNTHESIS (Hybrid Logic)
-- If you have BOTH `structured_data` and `rag_context`:
-  - Start with the hard facts (SQL/Stats).
-  - Follow up with the context/examples (RAG).
-
-### USER QUERY
+### USER QUESTION
 {question}
 """
 
@@ -240,6 +263,62 @@ def _check_fast_trap(query: str) -> str | None:
             return "Hello! I am SentimentScope's intelligent AI analyst for your chat history. Ask me about statistics (e.g., 'Who talks the most?') or search for specific topics (e.g., 'What did we say about pizza?')."
     return None
 
+
+async def generate_standalone_question(user_question: str, chat_history: List[BaseMessage]) -> str:
+    """
+    Generates a standalone question from user input and chat history
+    using primary and fallback context LLMs, with intelligent retries.
+    """
+    # 1. Format History for the Prompt
+    history_str = ""
+    for msg in chat_history[-6:]:  # Keep context window manageable
+        role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+        history_str += f"{role}: {msg.content}\n"
+
+    # 2. Compose Prompt
+    prompt_content = (
+        f"Given the chat history:\n{history_str}\n"
+        f"Rewrite the user's question as a standalone question:\n{user_question}"
+    )
+    
+    messages = [HumanMessage(content=prompt_content)]
+
+    # 3. Execution with Backoff Strategy
+    retries = 0
+    max_retries = 5
+    base_delay = 0.5 
+
+    while retries <= max_retries:
+        try:
+            # Attempt 1: Primary LLM
+            response = await context_llm.ainvoke(messages)
+            return response.content.strip()
+        
+        except RateLimitError:
+            log.warning(f"Primary Context LLM Rate Limited. Attempting Fallback... (Retry {retries})")
+            try:
+                # Attempt 2: Fallback LLM
+                response = await context_llm_fallback.ainvoke(messages)
+                return response.content.strip()
+            
+            except RateLimitError:
+                # Both failed: Exponential Backoff
+                retries += 1
+                if retries > max_retries:
+                    break
+                
+                sleep_time = base_delay * (2 ** retries) + random.uniform(0, 0.2)
+                log.warning(f"Rate limit hit on both LLMs. Retrying in {sleep_time:.2f}s...")
+                await asyncio.sleep(sleep_time)
+        
+        except Exception as e:
+            # Catch non-rate-limit errors (e.g. Context Length exceeded) and log
+            log.error(f"Contextualization Error: {e}")
+            return user_question # Fail safe: return original question
+
+    # If all retries exhausted, return original question to allow flow to continue
+    log.error("Failed to contextualize question after maximum retries.")
+    return user_question
 
 def _get_dashboard_capabilities(analytics_json: Dict[str, Any] | None) -> str:
     if not analytics_json:
@@ -271,6 +350,104 @@ def _get_dashboard_capabilities(analytics_json: Dict[str, Any] | None) -> str:
     return " ".join(caps) if len(caps) > 1 else "caps:none"
 
 
+def _calculate_dynamic_config(prompt_text: str):
+    """
+    Determines which model to use and the safe max_tokens value based on input size.
+    """
+    enc = tiktoken.get_encoding("cl100k_base")
+    prompt_tokens = len(enc.encode(prompt_text))
+    
+    # Logic: Prefer 4o, Fallback to Mini if context is too tight (or explicitly switched later)
+    # Note: You can adjust this threshold. Here we use 4o unless it's getting full, 
+    # but the retry logic below handles the cost/rate-limit fallback.
+    
+    # Calculate available tokens for 4o
+    if prompt_tokens < (CTX_WINDOW_MAIN_4O - 1000):
+        # Default to Primary
+        llm = main_llm_primary
+        safe_max_tokens = CTX_WINDOW_MAIN_4O - prompt_tokens - 500
+    else:
+        # Fallback immediately if prompt is massive
+        llm = main_llm_fallback
+        safe_max_tokens = min(CTX_WINDOW_MAIN_4O_MINI - prompt_tokens - 200, 4096)
+
+    # Cap max_tokens to avoid crazy outputs
+    if safe_max_tokens > 4096: 
+        safe_max_tokens = 4096
+        
+    return llm, safe_max_tokens, prompt_tokens
+
+async def execute_resilient_main_llm(
+    prompt_messages: List[BaseMessage], 
+    stream: bool = False
+) -> Union[str, AsyncGenerator[str, None]]:
+    """
+    Executes LLM call with:
+    1. Dynamic Token Calculation
+    2. Primary -> Fallback Model Switching
+    3. Exponential Backoff for Rate Limits
+    """
+    
+    # Convert messages to string for token counting
+    msg_texts = []
+    for m in prompt_messages:
+        if hasattr(m, 'content'):
+            msg_texts.append(m.content)
+        elif isinstance(m, tuple) and len(m) >= 2:
+            msg_texts.append(str(m[1]))
+        elif isinstance(m, str):
+            msg_texts.append(m)
+        else:
+            msg_texts.append(str(m))
+    
+    full_text = " ".join(msg_texts)
+    
+    # Initial Config
+    current_llm, dynamic_max, _ = _calculate_dynamic_config(full_text)
+    
+    retries = 0
+    max_retries = 5
+    base_delay = 0.5
+
+    while retries <= max_retries:
+        try:
+            # Apply Dynamic Max Tokens (Create a copy/runtime config if needed, 
+            # but binding directly works for single-request scope in standard usage)
+            # Langchain invoke accepts `max_tokens` in bind or call options usually, 
+            # but modifying the object property is the direct way per your pseudo-code.
+            current_llm.max_tokens = dynamic_max
+
+            if stream:
+                # For Streaming (Final Answer) - return the generator immediately
+                # Note: If rate limit hits *during* stream, it raises error in the consumption loop.
+                # This try/catch primarily protects the connection establishment.
+                return current_llm.astream(prompt_messages)
+            else:
+                # For Standard (SQL)
+                response = await current_llm.ainvoke(prompt_messages)
+                return response.content
+
+        except RateLimitError:
+            log.warning(f"Rate Limit Hit on {current_llm.azure_deployment}. Retries: {retries}")
+            
+            # Switch Strategy: If on Primary, downgrade to Fallback
+            if current_llm == main_llm_primary:
+                log.info("Switching to Fallback Model (Mini)...")
+                current_llm = main_llm_fallback
+                # Recalculate max tokens for the smaller model
+                _, _, p_tokens = _calculate_dynamic_config(full_text)
+                dynamic_max = min(CTX_WINDOW_MAIN_4O_MINI - p_tokens - 200, 4096)
+            else:
+                # Already on fallback, just backoff
+                retries += 1
+                sleep_time = base_delay * (2 ** retries) + random.uniform(0, 0.2)
+                await asyncio.sleep(sleep_time)
+        
+        except Exception as e:
+            log.error(f"LLM Execution Error: {e}")
+            raise e # Non-rate-limit errors should bubble up
+
+    raise Exception("Main LLM failed after maximum retries.")
 
 
 async def validate_sql_safety(sql: str) -> str:
@@ -303,19 +480,13 @@ async def validate_sql_safety(sql: str) -> str:
 
     return normalized_sql
 
-async def generate_and_execute_sql(
-    query: str, chat_id: int, db: AsyncSession
-) -> str:
-    """
-    Agents sub-routine: Generates SQL, validates safety, executes, and returns raw results.
-    """
+async def generate_and_execute_sql(query: str, chat_id: int, db: AsyncSession) -> str:
+    safe_sql = "N/A"
     try:
-        prompt = ChatPromptTemplate.from_template(SQL_GENERATION_PROMPT)
-        chain = prompt | main_llm | StrOutputParser()
-        raw_response = await chain.ainvoke({"question": query})
-        
+        prompt_template = ChatPromptTemplate.from_template(SQL_GENERATION_PROMPT)
+        prompt_messages = prompt_template.format_messages(question=query)
+        raw_response = await execute_resilient_main_llm(prompt_messages, stream=False)
         cleaned_json = raw_response.strip().replace('```json', '').replace('```', '')
-        
         try:
             parsed = json.loads(cleaned_json)
         except json.JSONDecodeError:
@@ -326,7 +497,10 @@ async def generate_and_execute_sql(
             return "REFUSE"
 
         sql_query = parsed.get("sql", "")
-        log.info(f"[SQL Agent] Generated: {sql_query}")
+        # Extract Reasoning
+        reasoning = parsed.get("reasoning", "Database Query Result")
+        
+        log.info(f"[SQL Agent] Generated: {sql_query} | Reasoning: {reasoning}")
 
         safe_sql = await validate_sql_safety(sql_query)
 
@@ -335,9 +509,16 @@ async def generate_and_execute_sql(
         rows = result.fetchall()
         
         if not rows:
-            return "No data found matching the criteria."
+            return f"[QUERY GOAL: {reasoning}] RESULT: No records found."
         
-        return str(rows[:20])
+        # Unwrap Logic
+        formatted_data = str(rows[:20])
+        if len(rows) == 1 and len(rows[0]) == 1:
+            formatted_data = str(rows[0][0])
+        elif len(rows) > 0 and len(rows[0]) == 1:
+            formatted_data = ", ".join([str(r[0]) for r in rows[:20]])
+
+        return f"[QUERY GOAL: {reasoning}] RESULT: {formatted_data}"
 
     except ProgrammingError as e:
         await db.rollback()
@@ -390,6 +571,7 @@ async def run_vector_search(query: str, chat_id: int):
 
 
 
+
 async def route_and_process(
     query: str, 
     analytics_json: Dict[str, Any] | None, 
@@ -413,13 +595,23 @@ async def route_and_process(
     
     standalone_question = query
     if chat_history:
-        try:
-            standalone_question = await contextualize_chain.ainvoke({
-                "chat_history": chat_history,
-                "question": query
-            })
-        except Exception as e:
-            log.error(f"Contextualization failed: {e}")
+        standalone_question = await generate_standalone_question(query, chat_history)
+        log.info(f"Contextualized: '{query}' -> '{standalone_question}'")
+
+    # --- SESSION CONTEXT FORMATTING (FIXED) ---
+    chat_context_str = ""
+    if chat_history:
+        recent_history = chat_history[-6:] 
+        formatted_turns = []
+        for msg in recent_history:
+            role = "User" if isinstance(msg, HumanMessage) else "SentimentScope"
+            # Truncate content for token safety
+            content = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content
+            formatted_turns.append(f"{role}: {content}")
+        chat_context_str = "\n".join(formatted_turns)
+    else:
+        # Pass empty string instead of "No history" to prevent LLM from commenting on it
+        chat_context_str = ""
     
 
     status_str = await crud.get_chat_embedding_status(db, chat_id)
@@ -476,8 +668,8 @@ async def route_and_process(
         if intent in ["analytics_dashboard", "hybrid_query"] and has_dashboard:
             raw_stats = serialize_analytics(analytics_json)
             
-            if len(raw_stats) > 15000:
-                raw_stats = raw_stats[:15000] + "... [TRUNCATED DUE TO SIZE]"
+            if len(raw_stats) > 20000:
+                raw_stats = raw_stats[:20000] + "..."
             
             structured_data = f"DASHBOARD STATS:\n{raw_stats}"
         if intent in ["sql_agent", "hybrid_query"] and is_sql_ready:
@@ -492,23 +684,29 @@ async def route_and_process(
             _, sources_list, rag_context = await run_vector_search(standalone_question, chat_id)
             
         prompt_inputs = {
-            "has_file": is_sql_ready, 
-            "embedding_status": status_str if status_str else "unknown", 
-            "data_sources_available": [k for k, v in [("SQL/Stats", structured_data != "None"), ("RAG", rag_context is not None)] if v],
             "structured_data": structured_data,
             "rag_context": rag_context if rag_context else "", 
+            "chat_context": chat_context_str, 
             "question": standalone_question
         }
         
-        chain = (
-            ChatPromptTemplate.from_template(MASTER_SYSTEM_PROMPT) 
-            | main_llm 
-            | StrOutputParser()
-        )
+        # Format messages using the Template
+        final_messages = ChatPromptTemplate.from_template(MASTER_SYSTEM_PROMPT).format_messages(**prompt_inputs)
 
-        async for chunk in chain.astream(prompt_inputs):
-            answer_accum += chunk
-            yield f"data: {json.dumps(chunk)}\n\n"
+        try:
+            # EXECUTE RESILIENT STREAM
+            stream_generator = await execute_resilient_main_llm(final_messages, stream=True)
+            
+            # Consume Stream
+            async for chunk in stream_generator:
+                # Langchain stream yields ChatGenerationChunk, we need the content
+                content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                answer_accum += content
+                yield f"data: {json.dumps(content)}\n\n"
+
+        except Exception as e:
+            log.error(f"Streaming Error: {e}")
+            yield f"data: {json.dumps('System is busy. Please try again.')}\n\n"
 
         if answer_accum:
             await _save_turn(db, chat_id, query, answer_accum, sources_list)

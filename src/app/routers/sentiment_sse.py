@@ -17,6 +17,7 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 REDIS_URL = settings.CELERY_BROKER_URL
+
 async def redis_event_generator(chat_id: int, request: Request):
     try:
         redis_client = aioredis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
@@ -25,7 +26,7 @@ async def redis_event_generator(chat_id: int, request: Request):
         
         await pubsub.subscribe(channel)
         
-        
+        # Immediate connection feedback
         yield f"event: connected\ndata: {json.dumps({'msg': 'Connected'})}\n\n"
 
         async for message in pubsub.listen():
@@ -35,10 +36,8 @@ async def redis_event_generator(chat_id: int, request: Request):
             if message["type"] == "message":
                 payload = json.loads(message["data"])
                 
-        
                 event_type = payload.get("status", "progress") 
                 data_body = json.dumps(payload.get("data", {}))
-                
                 
                 yield f"event: {event_type}\ndata: {data_body}\n\n"
 
@@ -75,9 +74,6 @@ async def cancel_sentiment_analysis(
     db: AsyncSession = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    """
-    Cancels the job 
-    """
     chat = await crud.get_chat(db, chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -86,19 +82,27 @@ async def cancel_sentiment_analysis(
         raise HTTPException(status_code=403, detail="Unauthorized")
         
     if chat.sentiment_status == schemas.SentimentStatusEnum.processing.value:
+        # 1. DB Update (Persistence)
         chat.cancel_requested = True
         db.add(chat)
         await db.commit()
         
+        redis_client = aioredis.from_url(REDIS_URL)
         try:
-            redis_client = aioredis.from_url(REDIS_URL)
+            # 2. Redis Kill Switch (Speed)
+            # Set a flag that expires in 1 hour. Worker checks this frequently.
+            await redis_client.setex(f"stop_signal_{chat_id}", 3600, "1")
+
+            # 3. Optimistic UI Update (UX)
+            # Tell frontend "It's done" immediately, even if worker takes 2 more seconds to die.
             await redis_client.publish(
                 f"chat_progress_{chat_id}", 
                 json.dumps({"status": "cancelled", "data": {"error": "Cancelled by user"}})
             )
-            await redis_client.close()
         except Exception as e:
             log.error(f"Failed to publish cancel event: {e}")
+        finally:
+            await redis_client.close()
 
         return {"status": "cancel_requested", "chat_id": chat_id}
     

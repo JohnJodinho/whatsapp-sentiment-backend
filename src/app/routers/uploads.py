@@ -17,8 +17,8 @@ from src.app.utils.raw_txt_parser import WhatsAppChatParser, CleanedMessage
 from src.app.utils.pre_process import clean_messages
 from src.app.utils.segment_chat import segment_by_time, group_by_sender
 from src.app.utils.extract_file_name import extract_chat_title
-from src.app.services.sentiment_worker import celery_app
-import src.app.services.embedding_worker
+from src.app.services.sentiment_worker import analyze_sentiment_task
+from src.app.services.embedding_worker import generate_embeddings_task
 from src.app.security import get_current_user
 from src.app.limiter import limiter
 import logging
@@ -84,8 +84,10 @@ async def upload_whatsapp_chat_file(
             cleaned_messages=parsed,
             segments_list= segments
         )
-        celery_app.send_task("analyze_sentiment", args=[chat_result.id])
-        celery_app.send_task("generate_embeddings", args=[chat_result.id])
+
+        
+        generate_embeddings_task.delay(chat_result.id)
+        analyze_sentiment_task.delay(chat_result.id)
 
         
 
