@@ -4,88 +4,52 @@ import json
 import os
 import redis
 from redis import ConnectionPool
-import time
-from src.app.config import settings
-from optimum.onnxruntime import ORTModelForSequenceClassification
-from transformers import AutoTokenizer, pipeline
-from onnxruntime import SessionOptions, GraphOptimizationLevel
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.pool import NullPool 
+from sqlalchemy.pool import NullPool
+from azure.ai.textanalytics.aio import TextAnalyticsClient
+from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError
+
 from src.app import crud, models
 from src.app.celery_app import celery_app
 from src.app.config import settings
 
-
+# --- CONFIGURATION ---
 try:
     DATABASE_URL = str(settings.DATABASE_URL)
 except ImportError:
     DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Access Azure settings via Pydantic model as requested
+AZURE_ENDPOINT = str(settings.AZURE_LANGUAGE_ENDPOINT)
+AZURE_KEY = settings.AZURE_LANGUAGE_KEY
 
 log = logging.getLogger(__name__)
 
-
 BROKER_URL = settings.CELERY_BROKER_URL
-
 redis_pool = ConnectionPool.from_url(BROKER_URL, decode_responses=True)
 
-# Optimized Model Loading 
-_PIPELINE = None
-_MODEL_PATH = "./onnx_model_optimized"
+# --- GLOBAL CLIENT ---
+_AZURE_CLIENT = None
 
-
-def get_pipeline():
+def get_azure_client():
     """
-    Loads model with Container-Safe Optimizations.
+    Lazy-loads the Azure Text Analytics Async Client.
     """
-    global _PIPELINE
-    if _PIPELINE is None:
-        # --- DEBUGGING BLOCK START ---
-        model_file = os.path.join(_MODEL_PATH, "model.onnx")
-        if os.path.exists(model_file):
-            size = os.path.getsize(model_file)
-            log.info(f"DEBUG: Found model at {model_file}")
-            log.info(f"DEBUG: File size is {size} bytes")
-            
-            if size < 5000: # If less than 5KB, it's definitely a pointer file
-                with open(model_file, 'r') as f:
-                    content = f.read()
-                log.error(f"CRITICAL: Model file is too small! Content preview: {content}")
-                raise Exception("Model file is a Git LFS pointer, not the actual binary.")
-        else:
-            log.error(f"CRITICAL: Model file not found at {model_file}")
-
-        log.info(f"Loading ONNX model from {_MODEL_PATH}...")
+    global _AZURE_CLIENT
+    if _AZURE_CLIENT is None:
+        log.info("Initializing Azure Text Analytics Client...")
         try:
-            sess_options = SessionOptions()
-            
-            # CRITICAL FIX for Containers:
-            # Set to 1 to prevent thread thrashing. Let Celery workers provide parallelism.
-            # If you are not using Celery concurrency, set this to 2 or 4 max.
-            sess_options.intra_op_num_threads = 1 
-            sess_options.inter_op_num_threads = 1
-            sess_options.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
-            
-            ort_model = ORTModelForSequenceClassification.from_pretrained(
-                _MODEL_PATH,
-                session_options=sess_options
+            credential = AzureKeyCredential(AZURE_KEY)
+            _AZURE_CLIENT = TextAnalyticsClient(
+                endpoint=AZURE_ENDPOINT, 
+                credential=credential
             )
-            tokenizer = AutoTokenizer.from_pretrained(_MODEL_PATH)
-            
-            _PIPELINE = pipeline(
-                "text-classification",
-                model=ort_model,
-                tokenizer=tokenizer,
-                top_k=None,
-                device=-1, # CPU
-                truncation=True,
-                max_length=512
-            )
-            log.info("ONNX Model loaded with single-threaded worker optimization.")
+            log.info("Azure Client initialized successfully.")
         except Exception as e:
-            log.error(f"Failed to load model: {e}")
+            log.error(f"Failed to initialize Azure Client: {e}")
             raise e
-    return _PIPELINE
+    return _AZURE_CLIENT
 
 def get_redis_sync():
     """Get a sync redis client from pool"""
@@ -94,15 +58,13 @@ def get_redis_sync():
 def should_stop(chat_id: int) -> bool:
     """
     Checks Redis for the 'kill switch'. 
-    Much faster than DB query, safe to call in loops.
     """
     try:
         r = get_redis_sync()
-        # Check if the stop signal key exists
         if r.exists(f"stop_signal_{chat_id}"):
             return True
     except Exception:
-        pass # If redis fails, rely on the eventual DB check
+        pass 
     return False
 
 def publish_progress(chat_id: int, status_key: str, data: dict):
@@ -114,37 +76,116 @@ def publish_progress(chat_id: int, status_key: str, data: dict):
     except Exception as e:
         log.error(f"Redis Publish Error: {e}")
 
+def map_azure_result(doc_result):
+    """
+    Maps Azure result to internal schema:
+    - positive/negative/neutral -> kept as is.
+    - mixed -> mapped to neutral.
+    - Score uses the confidence score of the chosen label.
+    """
+    sentiment = doc_result.sentiment  # 'positive', 'negative', 'neutral', 'mixed'
+    scores = doc_result.confidence_scores
 
-async def _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, pipe):
+    if sentiment == "positive":
+        return "positive", scores.positive
+    elif sentiment == "negative":
+        return "negative", scores.negative
+    elif sentiment == "neutral":
+        return "neutral", scores.neutral
+    elif sentiment == "mixed":
+        # Requirement: Map mixed to neutral.
+        # We use the neutral score to be consistent, even if it is low.
+        return "neutral", scores.neutral
+    
+    # Fallback
+    return "neutral", 0.0
+
+async def _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, client):
     if not buffer:
         return
 
     # 1. Sort by length (Performance Optimization)
     buffer.sort(key=lambda x: len(get_text_func(x)))
     
-    BATCH_SIZE = 16 
+    # Azure Limit: Max 10 documents per request
+    BATCH_SIZE = 10 
     processed_count = 0
-    UPDATE_FREQUENCY = 25 # Updated: More frequent visual updates
+    UPDATE_FREQUENCY = 20
+    
+    # Retry Configuration
+    MAX_RETRIES = 3
+    BASE_DELAY = 2
 
     # 2. Iterate in batches
     for i in range(0, len(buffer), BATCH_SIZE):
-        # --- CRITICAL: Check cancellation BEFORE every inference batch ---
+        # --- CRITICAL: Check cancellation BEFORE every API call ---
         if should_stop(chat_id):
             raise Exception("Cancelled by user")
         
         batch_items = buffer[i : i + BATCH_SIZE]
-        texts = [get_text_func(item) for item in batch_items]
+        
+        azure_batch = [
+            {"id": str(item.id), "text": get_text_func(item)} 
+            for item in batch_items
+        ]
 
-        # Inference
-        preds = pipe(texts, batch_size=len(texts), padding=True, truncation=True)
+        response = None
+        
+        # --- RETRY LOGIC START ---
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = await client.analyze_sentiment(documents=azure_batch)
+                break # Success, exit retry loop
+            
+            except HttpResponseError as e:
+                # Handle Rate Limiting (429)
+                if e.status_code == 429:
+                    if attempt == MAX_RETRIES:
+                        log.error(f"Max retries ({MAX_RETRIES}) reached for batch. Failing.")
+                        raise e
+                    
+                    # Calculate Backoff: Use 'Retry-After' header or default exponential backoff
+                    delay = BASE_DELAY * (2 ** attempt)
+                    if e.response and 'Retry-After' in e.response.headers:
+                        try:
+                            retry_after = int(e.response.headers['Retry-After'])
+                            delay = max(delay, retry_after)
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    log.warning(f"Rate limited (429). Retrying batch in {delay}s (Attempt {attempt + 1}/{MAX_RETRIES})...")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    # Non-retriable error (e.g., 401 Unauthorized, 400 Bad Request)
+                    log.error(f"Azure API Error: {e.message}")
+                    raise e
+            except Exception as e:
+                log.error(f"Unexpected batch error: {e}")
+                raise e
+        # --- RETRY LOGIC END ---
 
-        for item_obj, pred in zip(batch_items, preds):
-            p = pred[0] if isinstance(pred, list) else pred
-            payload = {
-                "overall_label": p.get("label"),
-                "overall_label_score": p.get("score_positive", p["score"]) if isinstance(p, dict) else p["score"],
-            }
-            await create_func(db, item_obj.id, payload, should_commit=False)
+        # Process results if response exists
+        if response:
+            try:
+                for idx, doc_result in enumerate(response):
+                    if doc_result.is_error:
+                        log.error(f"Document Error (ID: {doc_result.id}): {doc_result.error.code} - {doc_result.error.message}")
+                        label, score = "neutral", 0.0
+                    else:
+                        label, score = map_azure_result(doc_result)
+
+                    payload = {
+                        "overall_label": label,
+                        "overall_label_score": score,
+                    }
+                    
+                    item_obj = batch_items[idx]
+                    await create_func(db, item_obj.id, payload, should_commit=False)
+
+            except Exception as map_exc:
+                log.error(f"Result mapping failed: {map_exc}")
+                raise map_exc
         
         processed_count += len(batch_items)
 
@@ -152,7 +193,6 @@ async def _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func,
         if processed_count % UPDATE_FREQUENCY == 0 or processed_count == len(buffer):
             await db.commit() 
             
-            # Use a lightweight progress calculation if possible, or fetch from DB
             progress = await crud.get_sentiment_progress(db, chat_id)
             total = progress["messages_total"] + progress["segments_total"]
             done = progress["messages_scored"] + progress["segments_scored"]
@@ -161,22 +201,17 @@ async def _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func,
             publish_progress(chat_id, "progress", {
                 "percent": percent,
                 "messages_done": progress["messages_scored"],
-                "messages_total": progress["messages_total"], # <--- ADD THIS
+                "messages_total": progress["messages_total"],
                 "segments_done": progress["segments_scored"],
-                "segments_total": progress["segments_total"], # <--- ADD THIS
+                "segments_total": progress["segments_total"],
                 "total": total
             })
 
-
-async def _process_stage_batch(db, chat_id, stream_func, create_func, get_text_func, pipe, buffer_size=100):
+async def _process_stage_batch(db, chat_id, stream_func, create_func, get_text_func, client, buffer_size=100):
     buffer = []
-    
-    # We remove the initial `chat` DB fetch here to save time. 
-    # We rely on Redis for immediate cancellation checks.
     
     async for item in stream_func(db, chat_id):
         # --- Check cancellation during fetching ---
-        # We check every 50 items or via Redis instantly
         if len(buffer) % 50 == 0:
              if should_stop(chat_id):
                  raise Exception("Cancelled by user")
@@ -185,15 +220,17 @@ async def _process_stage_batch(db, chat_id, stream_func, create_func, get_text_f
         
         if len(buffer) >= buffer_size:
             log.info(f"Processing buffer of {len(buffer)} items...")
-            await _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, pipe)
+            await _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, client)
             buffer = [] 
 
     if buffer:
-        await _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, pipe)
+        await _process_smart_buffer(db, chat_id, buffer, create_func, get_text_func, client)
 
 
 async def process_chat_logic(chat_id: int):
-    pipe = get_pipeline()
+    # Get the shared Azure client
+    client = get_azure_client()
+    
     worker_engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
     WorkerSession = async_sessionmaker(worker_engine, expire_on_commit=False)
 
@@ -213,16 +250,16 @@ async def process_chat_logic(chat_id: int):
                 await db.commit()
 
             try:
-                # Reduced buffer size from 500 -> 100 for CPU
-                # This ensures the user sees progress within the first few seconds
+                # Reduced buffer size to 50 ensures frequent updates 
+                # and aligns with Azure's 10-doc limit (5 calls per buffer)
                 await _process_stage_batch(
                     db=db, 
                     chat_id=chat_id,
                     stream_func=crud.stream_unscored_messages,
                     create_func=crud.create_message_sentiment,
                     get_text_func=lambda x: x.content,
-                    pipe=pipe,
-                    buffer_size=100 
+                    client=client,
+                    buffer_size=50 
                 )
 
                 await _process_stage_batch(
@@ -231,8 +268,8 @@ async def process_chat_logic(chat_id: int):
                     stream_func=crud.stream_unscored_sender_segments,
                     create_func=crud.create_segment_sentiment,
                     get_text_func=lambda x: x.combined_text,
-                    pipe=pipe,
-                    buffer_size=100 
+                    client=client,
+                    buffer_size=50 
                 )
 
                 # Finalize
@@ -250,8 +287,6 @@ async def process_chat_logic(chat_id: int):
                 await db.rollback()
                 if str(e) == "Cancelled by user":
                     log.info(f"Chat {chat_id} stopped via Kill Switch.")
-                    # Note: We don't need to publish "cancelled" here because 
-                    # the API endpoint already did it 'optimistically'.
                 else:
                     log.error(f"Processing failed: {e}", exc_info=True)
                     chat.sentiment_status = models.SentimentStatusEnum.failed.value
@@ -260,6 +295,8 @@ async def process_chat_logic(chat_id: int):
                     publish_progress(chat_id, "error", {"error": str(e)})
                 raise e
     finally:
+        # We do NOT close the global _AZURE_CLIENT here, as it is shared across tasks.
+        # It will be closed when the application/worker shuts down.
         await worker_engine.dispose()
 
 @celery_app.task(name="src.app.services.sentiment_worker.analyze_sentiment_task", bind=True, max_retries=3)
@@ -269,4 +306,5 @@ def analyze_sentiment_task(self, chat_id: int):
     except Exception as exc:
         if str(exc) == "Cancelled by user":
             return
+        # Exponential backoff for retries
         self.retry(exc=exc, countdown=5)

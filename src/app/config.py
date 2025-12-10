@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT_MAIN_4O_MINI: str
     AZURE_OPENAI_API_KEY_MAIN_4O_MINI: str
     AZURE_OPENAI_API_VERSION_MAIN_4O_MINI: str
-
+    AZURE_LANGUAGE_ENDPOINT: AnyHttpUrl
+    AZURE_LANGUAGE_KEY: str
 
     SECRET_KEY: str = secrets.token_urlsafe(32)
     IS_CELERY_WORKER: str = "false"

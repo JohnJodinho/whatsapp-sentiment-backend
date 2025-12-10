@@ -155,3 +155,5 @@ zstandard==0.25.0
 pgvector
 qdrant-client
 tiktoken
+azure-ai-textanalytics
+azure-core

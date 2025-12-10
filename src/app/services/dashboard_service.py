@@ -1,11 +1,11 @@
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, extract, Select, case
+from sqlalchemy import select, func, extract, Select, case, String
+from sqlalchemy.dialects.postgresql import INTERVAL
 from typing import Dict, List, Coroutine, Any, Tuple
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 
-# Use relative imports
 from src.app.schemas import (
     DashboardData, 
     DashboardFilters, 
@@ -35,7 +35,8 @@ from src.app.schemas import (
 from collections import defaultdict
 from src.app.models import Chat, Message, Participant
 
-# --- Phase 2: Time Period Buckets ---
+
+
 TIME_PERIOD_BUCKETS: Dict[str, List[int]] = {
     "Morning": [6, 7, 8, 9, 10, 11],
     "Afternoon": [12, 13, 14, 15, 16],
@@ -43,8 +44,7 @@ TIME_PERIOD_BUCKETS: Dict[str, List[int]] = {
     "Night": [21, 22, 23, 0, 1, 2, 3, 4, 5],
 }
 
-# Day of week map (0=Sunday in PostgreSQL's 'dow')
-# Matches your api.ts: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+
 DAY_OF_WEEK_MAP: List[str] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
 
 
@@ -68,22 +68,17 @@ def create_base_query(filters: DashboardFilters, chat_id: int) -> Select:
     )
 
     if filters.start_date:
-        # --- THIS IS THE FIX ---
-        # Convert 'aware' datetimes from frontend to 'naive' (in UTC)
-        # to match the likely 'naive' database column.
+    
         start_date = filters.start_date
         if start_date.tzinfo:
             start_date = start_date.replace(tzinfo=None)
         query = query.where(Message.timestamp >= start_date)
-        # --- END OF FIX ---
-        
+            
     if filters.end_date:
-        # --- THIS IS THE FIX ---
         end_date = filters.end_date
         if end_date.tzinfo:
             end_date = end_date.replace(tzinfo=None)
         query = query.where(Message.timestamp <= end_date)
-        # --- END OF FIX ---
     if filters.participants:
         query = query.where(Participant.name.in_(filters.participants))
     if filters.time_period:
@@ -94,21 +89,19 @@ def create_base_query(filters: DashboardFilters, chat_id: int) -> Select:
     return query
 
 
-# --- Phase 3: Date Truncation Helpers (for zero-filling) ---
-
 def _start_of_day(dt: datetime) -> datetime:
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 def _start_of_week(dt: datetime) -> datetime:
     """Returns the start of the week (Sunday), matching date-fns enUS locale."""
     start_of_day = _start_of_day(dt)
-    # Python weekday(): Mon=0, Sun=6. We want to subtract days to get to Sunday.
-    # (dt.weekday() + 1) % 7 gives: Sun=0, Mon=1, Tue=2, ...
+
     days_to_subtract = (start_of_day.weekday() + 1) % 7
     return start_of_day - timedelta(days=days_to_subtract)
 
 def _start_of_month(dt: datetime) -> datetime:
     return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
 
 async def _get_all_participants(chat_id: int, db: AsyncSession) -> List[str]:
     """
@@ -142,7 +135,6 @@ async def _get_kpi_aggregates(
         .select_from(sub)  
     )
 
-    # New fix
     row = (await db.execute(stmt)).one()
     
     return (
@@ -163,10 +155,10 @@ async def _get_activity_by_day(base_query: Select, db: AsyncSession) -> List[Day
             extract('dow', sub.c.timestamp).label("day_of_week"),
             func.count(sub.c.id).label("message_count")
         )
-        .select_from(sub)  # <-- ADD THIS LINE
+        .select_from(sub)  
         .group_by("day_of_week")
     )
-    # --- END OF FIX ---
+    
     
     result = await db.execute(stmt)
     
@@ -186,17 +178,14 @@ async def _get_hourly_activity(base_query: Select, db: AsyncSession) -> List[Hou
     (0=12am, 1=1am, ..., 23=11pm)
     """
     sub = base_query.subquery()
-
-    # --- THIS IS THE FIX ---
     stmt = (
         select(
             extract('hour', sub.c.timestamp).label("hour_of_day"),
             func.count(sub.c.id).label("message_count")
         )
-        .select_from(sub)  # <-- ADD THIS LINE
+        .select_from(sub) 
         .group_by("hour_of_day")
     )
-    # --- END OF FIX ---
     
     result = await db.execute(stmt)
     
@@ -214,14 +203,16 @@ async def _get_time_series_data(
 ) -> Tuple[List[MessagesOverTimeData], List[SparklineData], List[SparklineData]]:
     """
     Fetches all time-series data:
-    1. Messages over time (for main chart)
-    2. Message count sparkline (for KPI)
-    3. Participant count sparkline (for KPI)
+    1. Messages over time (main chart)
+    2. Message count sparkline
+    3. Participant count sparkline
 
-    This replicates the dynamic day/week/month logic from api.ts.
+    Fully aligned with sentiment trend time-series logic.
     """
-    
-    # 1. Find the true min/max date range from the filtered data
+
+    # ------------------------------
+    # 1. Get real min/max timestamps
+    # ------------------------------
     sub = base_query.subquery()
     range_stmt = select(
         func.min(sub.c.timestamp).label("min_ts"),
@@ -230,23 +221,24 @@ async def _get_time_series_data(
     range_result = (await db.execute(range_stmt)).one_or_none()
 
     if not range_result or not range_result.min_ts:
-        # No data for this filter, return empty lists
         return ([], [], [])
 
     min_ts: datetime = range_result.min_ts
     max_ts: datetime = range_result.max_ts
-    
-    # 2. Choose aggregation level
+
+    # ------------------------------
+    # 2. Detect range and granularity
+    # ------------------------------
     total_days = (max_ts - min_ts).days
     trunc_level: str
     interval: timedelta | relativedelta
     python_date_trunc: callable
-    
-    if total_days <= 60:
+
+    if total_days <= 90:
         trunc_level = "day"
         interval = timedelta(days=1)
         python_date_trunc = _start_of_day
-    elif total_days <= 365:
+    elif total_days <= 730:
         trunc_level = "week"
         interval = timedelta(weeks=1)
         python_date_trunc = _start_of_week
@@ -255,60 +247,78 @@ async def _get_time_series_data(
         interval = relativedelta(months=1)
         python_date_trunc = _start_of_month
 
-    # 3. Run ONE query to get all sparse time-series data
-    # ---
-    # THE FIX IS HERE: We added .select_from(sub)
-    # and made the counts explicit (sub.c.id)
-    # ---
+    # ------------------------------
+    # 3. SQL truncation expression
+    # ------------------------------
+    if trunc_level == "week":
+        # Match EXACT logic of sentiment trend
+        dow_string = func.cast(func.extract('dow', sub.c.timestamp), String)
+        interval_string = dow_string + ' days'
+        dow_interval = func.cast(interval_string, INTERVAL)
+
+        trunc_expression = func.date_trunc(
+            'day',
+            sub.c.timestamp - dow_interval
+        )
+    else:
+        trunc_expression = func.date_trunc(
+            trunc_level,
+            sub.c.timestamp
+        )
+
+    # ------------------------------
+    # 4. Build SQL query
+    # ------------------------------
     stmt = (
         select(
-            func.date_trunc(trunc_level, sub.c.timestamp).label("period"),
-            func.count(sub.c.id).label("message_count"), # Explicit count
+            trunc_expression.label("period"),
+            func.count(sub.c.id).label("message_count"),
             func.count(func.distinct(sub.c.participant_id)).label("participant_count")
         )
-        .select_from(sub)  # <-- THIS WAS THE MISSING LINE
-        .group_by("period")
-        .order_by("period")
+        .select_from(sub)
+        .group_by(trunc_expression)
+        .order_by(trunc_expression)
     )
-    
+
     result = await db.execute(stmt)
-    
-    # Put results into a map for fast, zero-filled lookup
-    # We cast the key to .date() for reliable matching
+
+    # ------------------------------
+    # 5. Convert SQL output to map
+    # ------------------------------
     data_map = {
         row.period.date(): (row.message_count, row.participant_count)
         for row in result
     }
-    
-    # 4. Zero-fill the gaps in Python
+
+    # ------------------------------
+    # 6. Zero-fill missing periods
+    # ------------------------------
     messages_over_time: List[MessagesOverTimeData] = []
     messages_sparkline: List[SparklineData] = []
     participants_sparkline: List[SparklineData] = []
-    
+
     current_ts = python_date_trunc(min_ts)
     series_end = python_date_trunc(max_ts)
-    
+
     while current_ts <= series_end:
-        # Get counts from our map, default to (0, 0) if no data
         msg_count, part_count = data_map.get(current_ts.date(), (0, 0))
-        
-        # A. For MessagesOverTimeChart
+
+        # A. Main chart
         messages_over_time.append(
             MessagesOverTimeData(
                 date=current_ts.strftime("%Y-%m-%d"),
                 count=msg_count
             )
         )
-        
-        # B. For "Total Messages" KPI Sparkline
+
+        # B. Sparkline (messages)
         messages_sparkline.append(SparklineData(v=msg_count))
-        
-        # C. For "Active Participants" KPI Sparkline
+
+        # C. Sparkline (participants)
         participants_sparkline.append(SparklineData(v=part_count))
-        
-        # Move to the next period
+
         current_ts += interval
-        
+
     return (messages_over_time, messages_sparkline, participants_sparkline)
 
 
