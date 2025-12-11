@@ -1,7 +1,8 @@
 # src/app/services/retrieval_service.py
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from datetime import datetime
 from qdrant_client import AsyncQdrantClient, models as qmodels
 
 from src.app.config import settings
@@ -25,7 +26,13 @@ class QdrantVectorRetriever:
     def __init__(self, top_k: int = 5):
         self.top_k = top_k
 
-    async def aget_relevant_documents(self, query: str, chat_id: int) -> List[RagSource]:
+    async def aget_relevant_documents(
+            self, 
+            query: str, 
+            chat_id: int,
+            sender_names: Optional[List[str]] = None,
+            time_ranges: Optional[List[Tuple[datetime, datetime]]] = None
+    ) -> List[RagSource]:
         """
         Performs vector search in Qdrant scoped to the specific chat_id.
         """
@@ -36,41 +43,85 @@ class QdrantVectorRetriever:
             return []
 
         query_vector = query_vectors[0]
-        try:
-            # FIX: Use query_points (Unified API) and await it
-            results = await qdrant.query_points(
-                collection_name=QDRANT_COLLECTION,
-                query=query_vector, # Argument is now 'query', not 'query_vector'
-                limit=self.top_k,
-                query_filter=qmodels.Filter(
-                    must=[
-                        qmodels.FieldCondition(
-                            key="chat_id",
-                            match=qmodels.MatchValue(value=chat_id)
-                        )
-                    ]
+
+        # Base Filter: Chat ID
+        must_conditions = [
+            qmodels.FieldCondition(
+                key="chat_id",
+                match=qmodels.MatchValue(value=chat_id)
+            )
+        ]
+
+        # --- FIX FOR TEXT INDEX COMPATIBILITY ---
+        # If index is TEXT, we cannot use MatchAny (which requires KEYWORD).
+        # We must use MatchText inside a 'Should' clause to simulate "OR".
+        if sender_names:
+            sender_conditions = []
+            for name in sender_names:
+                sender_conditions.append(
+                    qmodels.FieldCondition(
+                        key="sender_name",
+                        match=qmodels.MatchText(text=name)  # <--- CHANGED TO MatchText
+                    )
+                )
+            
+            # Wrap in 'must' -> 'should' (logical OR between names)
+            must_conditions.append(
+                qmodels.Filter(
+                    should=sender_conditions
                 )
             )
-            # FIX: The actual list is inside .points
+
+        # Conditional: Filter by Multiple Non-Contiguous Time Ranges (Logical OR)
+        if time_ranges:
+            time_range_conditions = []
+            for start_date, end_date in time_ranges:
+                range_filter = qmodels.Range(
+                    gte=start_date.isoformat() if start_date else None,
+                    lte=end_date.isoformat() if end_date else None
+                )
+                time_range_conditions.append(
+                    qmodels.FieldCondition(
+                        key="timestamp",
+                        range=range_filter
+                    )
+                )
+            
+            # Use a 'Should' clause to logically OR the time range conditions
+            must_conditions.append(
+                qmodels.Filter( # Changed from HasIdCondition which was incorrect for this structure
+                    should=time_range_conditions
+                )
+            )
+
+        try:
+            results = await qdrant.query_points(
+                collection_name=QDRANT_COLLECTION,
+                query=query_vector,
+                limit=self.top_k,
+                query_filter=qmodels.Filter(
+                    must=must_conditions
+                )
+            )
             hits = results.points
         except Exception as e:
             log.error(f"Qdrant search failed: {e}")
             return []
 
         # 3. Map to RagSource Schema
-        # Note: We stored the text in the payload during ingestion, so no need for a 2nd DB hop!
         sources = []
         for hit in hits:
             payload = hit.payload or {}
             
-            # Defensive check for required fields
             if "text" not in payload:
                 continue
                 
             sources.append(RagSource(
                 source_table=payload.get("source_table", "unknown"),
                 source_id=payload.get("source_id", 0),
-                distance=hit.score, # Qdrant returns cosine similarity score
+                sender_name=payload.get("sender_name"),
+                timestamp=payload.get("timestamp"),
+                distance=hit.score,
                 text=payload.get("text")
             ))
             

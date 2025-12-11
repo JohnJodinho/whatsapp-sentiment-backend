@@ -391,6 +391,8 @@ class SentimentDashboardData(BaseModel):
 class RagSource(BaseModel):
     source_table: str
     source_id: int
+    sender_name: Optional[str] = None
+    timestamp: Optional[datetime] = None
     distance: float
     text: Optional[str] = None
 

@@ -3,10 +3,10 @@ import re
 import json
 import asyncio
 import tiktoken
-from typing import Dict, Any, List, AsyncGenerator, Union
+from typing import Dict, Any, List, AsyncGenerator, Union, Tuple, Optional
 import random
 from openai import RateLimitError
-
+from datetime import datetime
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
@@ -188,6 +188,29 @@ Return strictly a JSON object, no markdown: {{"intent": "intent_name"}}
 {question}
 """
 
+FILTER_EXTRACTION_PROMPT = """
+You are a Query Analyst. Extract search filters from the user query.
+
+### DATE CONTEXT
+Today's Date: {current_date}
+
+### RULES
+1. **Senders:** If specific people are mentioned (e.g., "John", "Sarah"), extract them into a list.
+2. **Time Ranges:** If time periods are mentioned (e.g., "yesterday", "last week", "in December"), calculate the precise ISO 8601 start and end timestamps.
+   - Return a list of lists: [[start_iso, end_iso], ...]
+3. If no filters exist, return null/None for those fields.
+
+### OUTPUT FORMAT (Strict JSON)
+{{
+    "sender_names": ["Name1", "Name2"] or null,
+    "time_ranges": [["2023-01-01T00:00:00", "2023-01-01T23:59:59"]] or null
+}}
+
+### USER QUERY
+{question}
+"""
+
+
 SQL_GENERATION_PROMPT = f"""
 You are a PostgreSQL Data Engineer. Generate a safe, read-only SQL query for the user question.
 
@@ -319,6 +342,9 @@ async def generate_standalone_question(user_question: str, chat_history: List[Ba
     # If all retries exhausted, return original question to allow flow to continue
     log.error("Failed to contextualize question after maximum retries.")
     return user_question
+
+
+
 
 def _get_dashboard_capabilities(analytics_json: Dict[str, Any] | None) -> str:
     if not analytics_json:
@@ -553,19 +579,24 @@ async def generate_and_execute_sql(query: str, chat_id: int, db: AsyncSession) -
         log.critical(f"[SQL Agent] Critical Python Error: {e}", exc_info=True)
         return "REFUSE"
 
-async def run_vector_search(query: str, chat_id: int):
-    docs = await retriever.aget_relevant_documents(query, chat_id)
+async def run_vector_search(
+        query: str, 
+        chat_id: int,
+        sender_names: Optional[List[str]] = None,
+        time_ranges: Optional[List[Tuple[datetime, datetime]]] = None
+):
+    docs = await retriever.aget_relevant_documents(query, chat_id, sender_names=sender_names, time_ranges=time_ranges)
     
     if not docs:
         
         return [], [], None 
         
     sources_list = [
-        {"source_table": s.source_table, "source_id": s.source_id, "distance": s.distance, "text": s.text} 
+        {"source_table": s.source_table, "source_id": s.source_id, "distance": s.distance, "text": s.text, "sender_name": s.sender_name, "timestamp": s.timestamp} 
         for s in docs
     ]
     
-    context_text = "\n\n".join([f"[{d.source_table}:{d.source_id}] {d.text}" for d in docs])
+    context_text = "\n\n".join([f"[{d.source_table}:{d.source_id}, message_sender: {d.sender_name}, time_sent: {d.timestamp}] {d.text}" for d in docs])
     
     return docs, sources_list, context_text
 
@@ -681,7 +712,11 @@ async def route_and_process(
                     structured_data += f"\n\nSQL RESULT: {sql_res}"
 
         if intent in ["vector_search", "hybrid_query", "sql_agent", "general"] and is_embeddings_ready:
-            _, sources_list, rag_context = await run_vector_search(standalone_question, chat_id)
+            search_filters = await extract_search_filters(standalone_question)
+            if search_filters:
+                log.info(f"Applying filters: {search_filters}")
+
+            _, sources_list, rag_context = await run_vector_search(standalone_question, chat_id, sender_names=search_filters.get("sender_names"), time_ranges=search_filters.get("time_ranges"))
             
         prompt_inputs = {
             "structured_data": structured_data,
@@ -709,6 +744,8 @@ async def route_and_process(
             yield f"data: {json.dumps('System is busy. Please try again.')}\n\n"
 
         if answer_accum:
+
+            sources_list = _sanitize_sources(sources_list)
             await _save_turn(db, chat_id, query, answer_accum, sources_list)
             
         final_resp = {
@@ -743,3 +780,89 @@ async def _save_turn(
         )
     except Exception as e:
         log.error(f"Failed to save conversation turn for chat {chat_id}: {e}")
+
+
+
+
+
+async def extract_search_filters(query: str) -> Dict[str, Any]:
+    """
+    Uses the main LLM to extract metadata filters (senders, dates) from the query.
+    Returns a dict compatible with retrieval_service arguments.
+    """
+    from datetime import datetime
+    
+    current_date = datetime.now().isoformat()
+    
+    try:
+        # 1. Format Prompt
+        prompt_template = ChatPromptTemplate.from_template(FILTER_EXTRACTION_PROMPT)
+        prompt_messages = prompt_template.format_messages(
+            current_date=current_date, 
+            question=query
+        )
+        
+        # 2. Execute using your existing resilient handler
+        raw_response = await execute_resilient_main_llm(prompt_messages, stream=False)
+        
+        # 3. Clean and Parse JSON
+        cleaned_json = raw_response.strip().replace('```json', '').replace('```', '')
+        parsed = json.loads(cleaned_json)
+        
+        # 4. Construct Final Filters
+        final_filters = {}
+        
+        # Handle Senders
+        if parsed.get("sender_names"):
+            final_filters["sender_names"] = parsed["sender_names"]
+            
+        # Handle Time Ranges (Convert ISO strings to datetime objects)
+        if parsed.get("time_ranges"):
+            processed_ranges = []
+            for range_pair in parsed["time_ranges"]:
+                if isinstance(range_pair, list) and len(range_pair) == 2:
+                    try:
+                        s_dt = datetime.fromisoformat(range_pair[0])
+                        e_dt = datetime.fromisoformat(range_pair[1])
+                        processed_ranges.append((s_dt, e_dt))
+                    except ValueError:
+                        continue 
+            
+            if processed_ranges:
+                final_filters["time_ranges"] = processed_ranges
+
+        return final_filters
+
+    except Exception as e:
+        log.warning(f"[Filter Extraction] Failed: {e}")
+        return {}
+
+
+def _sanitize_sources(sources: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    """
+    Converts a list of RagSource objects (or dicts) into JSON-safe dictionaries.
+    Specifically converts 'datetime' objects to ISO strings.
+    """
+    if not sources:
+        return []
+        
+    cleaned = []
+    for src in sources:
+        # 1. Convert Pydantic models to dicts if necessary
+        if hasattr(src, "model_dump"):  # Pydantic v2
+            data = src.model_dump()
+        elif hasattr(src, "dict"):      # Pydantic v1
+            data = src.dict()
+        elif isinstance(src, dict):
+            data = src.copy()
+        else:
+            continue # Skip unknown types
+
+        # 2. Serialize datetime to String
+        # Check if 'timestamp' exists and is a datetime object
+        if "timestamp" in data and isinstance(data["timestamp"], datetime):
+            data["timestamp"] = data["timestamp"].isoformat()
+            
+        cleaned.append(data)
+        
+    return cleaned

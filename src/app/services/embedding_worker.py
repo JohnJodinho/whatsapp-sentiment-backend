@@ -47,6 +47,20 @@ async def _ensure_collection_exists(client: AsyncQdrantClient):
             field_schema=qmodels.PayloadSchemaType.INTEGER
         )
 
+        await client.create_payload_index(
+            collection_name=QDRANT_COLLECTION,
+            field_name="sender_name",
+            field_schema=qmodels.PayloadSchemaType.TEXT
+        )
+
+        await client.create_payload_index(
+            collection_name=QDRANT_COLLECTION,
+            field_name="timestamp",
+            field_schema=qmodels.PayloadSchemaType.DATETIME
+        )
+
+
+
 @celery_app.task(name="src.app.services.embedding_worker.generate_embeddings_task", bind=True, acks_late=True)
 def generate_embeddings_task(self, chat_id: int):
     """
@@ -158,14 +172,17 @@ async def data_stream_generator(db, chat_id: int, cutoff_date: datetime, max_ite
 
             # Timezone fix
             ts = msg.timestamp if msg.timestamp.tzinfo else msg.timestamp.replace(tzinfo=timezone.utc)
-            
+            participant_id = msg.participant_id
+            participant = msg.participant.name
             # Add to buffer
             current_batch.append({
                 "type": "message",
                 "id": msg.id,
                 "text": msg.content,
                 "timestamp": ts,
-                "source_table": "messages"
+                "source_table": "messages",
+                "participant_id": participant_id,
+                "sender_name": participant if participant else None
             })
             total_processed_count += 1
 
@@ -206,13 +223,18 @@ async def data_stream_generator(db, chat_id: int, cutoff_date: datetime, max_ite
                 if seg_ts.tzinfo is None:
                     seg_ts = seg_ts.replace(tzinfo=timezone.utc)
 
-                # Add to buffer
+                participant_id = seg.sender_id
+                participant = seg.participant.name
+
                 current_batch.append({
                     "type": "segment",
                     "id": seg.id,
                     "text": seg.combined_text,
                     "timestamp": seg_ts,
-                    "source_table": "segments_sender"
+                    "source_table": "segments_sender",
+                    "participant_id": participant_id,
+                    "sender_name": participant if participant else None
+
                 })
                 total_processed_count += 1
 
@@ -256,7 +278,9 @@ async def process_and_upload_batch(client: AsyncQdrantClient, batch: List[Dict],
             "source_id": item["id"],
             "chat_id": chat_id,
             "text": item["text"],
-            "timestamp": item["timestamp"].isoformat()
+            "timestamp": item["timestamp"].isoformat(),
+            "participant_id": item.get("participant_id"),
+            "sender_name": item.get("sender_name")
         }
 
         points.append(qmodels.PointStruct(
