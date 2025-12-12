@@ -264,9 +264,15 @@ Your goal is to answer the user's questions directly and naturally.
 3. **Handle Discrepancies:**
    - If [STATISTICS] says "0 messages" but [EXCERPTS] shows John talking, trust the [EXCERPTS] and say: "I see John chatting, but I don't have his exact message count right now."
 
-4. **Citations:**
-   - Only cite specific quotes from [CONVERSATION EXCERPTS] using `[source_table:id]`.
-   - Do not cite statistics.
+4. **Citations (CRITICAL):**
+   - **STRICT FORMAT:** You must use the format `[table_name:id]`.
+   - **VARIABLE TABLE NAMES:** The `table_name` MUST match the source provided in the excerpts (usually `messages` or `segments_sender`).
+   - **FORBIDDEN:** Do NOT add words like "Source:", "Reference:", or "Ref:" inside the brackets.
+   - **EXAMPLES:**
+      - ✅ CORRECT (Message): "The user asked for help [messages:284619]"
+      - ✅ CORRECT (Segment): "They discussed the scholarship deadline [segments_sender:4401]"
+      - ❌ WRONG (Extra text): "The user asked for help [Source: messages:284619]"
+   - Only cite specific quotes from [CONVERSATION EXCERPTS]. Do not cite statistics.
 
 ### USER QUESTION
 {question}
@@ -790,33 +796,25 @@ async def extract_search_filters(query: str) -> Dict[str, Any]:
     Uses the main LLM to extract metadata filters (senders, dates) from the query.
     Returns a dict compatible with retrieval_service arguments.
     """
-    from datetime import datetime
-    
     current_date = datetime.now().isoformat()
     
     try:
-        # 1. Format Prompt
         prompt_template = ChatPromptTemplate.from_template(FILTER_EXTRACTION_PROMPT)
         prompt_messages = prompt_template.format_messages(
             current_date=current_date, 
             question=query
         )
         
-        # 2. Execute using your existing resilient handler
         raw_response = await execute_resilient_main_llm(prompt_messages, stream=False)
         
-        # 3. Clean and Parse JSON
         cleaned_json = raw_response.strip().replace('```json', '').replace('```', '')
         parsed = json.loads(cleaned_json)
-        
-        # 4. Construct Final Filters
+
         final_filters = {}
-        
-        # Handle Senders
+    
         if parsed.get("sender_names"):
             final_filters["sender_names"] = parsed["sender_names"]
             
-        # Handle Time Ranges (Convert ISO strings to datetime objects)
         if parsed.get("time_ranges"):
             processed_ranges = []
             for range_pair in parsed["time_ranges"]:
