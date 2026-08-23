@@ -1,0 +1,6 @@
+from src.app.config import settings
+
+print(settings.AZURE_OPENAI_API_KEY_SUMMARY)
+print(settings.AZURE_OPENAI_API_VERSION_SUMMARY)
+print(settings.AZURE_OPENAI_DEPLOYMENT_SUMMARY)
+print(settings.AZURE_OPENAI_ENDPOINT_SUMMARY)
