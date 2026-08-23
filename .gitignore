@@ -1,18 +1,19 @@
+# Virtual Environments
 venv312/
 venv*/
 .venv/
-tests/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-outputs/
-onnx_model/
-reports/
-sample_data/
-# C extensions
 *.so
-inst/
+
 # Distribution / packaging
 .Python
 build/
@@ -32,6 +33,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+__pypackages__/
 
 # Unit test / coverage reports
 htmlcov/
@@ -48,14 +50,19 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+# Application Outputs and Data
+outputs/
+reports/
+sample_data/
+inst/
+*.log
 
-# Environments
+# Models
+models/
+*.onnx
+
+# Secrets and Configs
 .env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+
+# OS Files
+.DS_Store

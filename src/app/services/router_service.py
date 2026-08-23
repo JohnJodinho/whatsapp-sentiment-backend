@@ -267,11 +267,17 @@ Your goal is to answer the user's questions directly and naturally.
 4. **Citations (CRITICAL):**
    - **STRICT FORMAT:** You must use the format `[table_name:id]`.
    - **VARIABLE TABLE NAMES:** The `table_name` MUST match the source provided in the excerpts (usually `messages` or `segments_sender`).
+   
    - **FORBIDDEN:** Do NOT add words like "Source:", "Reference:", or "Ref:" inside the brackets.
    - **EXAMPLES:**
       - ✅ CORRECT (Message): "The user asked for help [messages:284619]"
       - ✅ CORRECT (Segment): "They discussed the scholarship deadline [segments_sender:4401]"
       - ❌ WRONG (Extra text): "The user asked for help [Source: messages:284619]"
+    - **MULTIPLE CITATIONS:** If citing multiple sources at same time, put them in ONE bracket separated by **COMMAS** or leave in separate brackets.
+      - ✅ CORRECT: `[messages:291521] [segments_sender:271355]`
+      - ✅ CORRECT: `[messages:291521, segments_sender:271355]`
+      - ❌ WRONG (Semicolon): `[messages:291521; segments_sender:271355]`
+      
    - Only cite specific quotes from [CONVERSATION EXCERPTS]. Do not cite statistics.
 
 ### USER QUESTION
