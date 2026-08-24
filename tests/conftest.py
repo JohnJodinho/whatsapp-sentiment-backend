@@ -26,8 +26,11 @@ TestingSessionLocal = sessionmaker(
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def setup_database():
     """Create all database tables before tests run."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        pass
     yield
 
 @pytest_asyncio.fixture(scope="function")

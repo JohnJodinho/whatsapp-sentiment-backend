@@ -22,7 +22,7 @@ async def delete_single_chat_background(chat_id: int):
             try:
                 await delete_chat_embeddings(chat_id)
             except Exception as e:
-                log.error(f"Failed to delete Qdrant vectors for chat {chat_id}: {e}")
+                log.error(f"Failed to delete vector embeddings for chat {chat_id}: {e}")
 
             log.info(f"Background deletion completed for chat_id={chat_id}")
 

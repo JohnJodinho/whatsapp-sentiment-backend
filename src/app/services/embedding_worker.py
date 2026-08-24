@@ -6,101 +6,50 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, AsyncGenerator
 
-from qdrant_client import AsyncQdrantClient, models as qmodels
-from sqlalchemy.pool import NullPool
 from src.app.config import settings
 from src.app.celery_app import celery_app
 from src.app.db.session import AsyncSessionLocal
 from src.app import crud, schemas
-
+from src.app.services.vector_store import get_vector_store, VectorStore
 from src.app.services.embedding_service import embed_texts
 
 log = logging.getLogger(__name__)
 
 # --- Configuration ---
-QDRANT_COLLECTION = "chat_vectors"
-VECTOR_SIZE = 1536  
-HARD_CAP_LIMIT = 5000  
-HISTORY_LIMIT_DAYS = 730  
-MIN_WORD_COUNT = 4  
+VECTOR_SIZE = 384  # Davlan/afro-xlmr-mini INT8
+HARD_CAP_LIMIT = 5000
+HISTORY_LIMIT_DAYS = 730
+MIN_WORD_COUNT = 4
 DB_BATCH_SIZE = 1000
-MAX_CONCURRENT_EMBEDS = 5
-EMBED_BATCH_SIZE = 100
-
-
-
-async def _ensure_collection_exists(client: AsyncQdrantClient):
-    """Idempotent collection setup."""
-    if not await client.collection_exists(QDRANT_COLLECTION):
-        log.info(f"Creating Qdrant collection: {QDRANT_COLLECTION}")
-        await client.create_collection(
-            collection_name=QDRANT_COLLECTION,
-            vectors_config=qmodels.VectorParams(
-                size=VECTOR_SIZE,
-                distance=qmodels.Distance.COSINE
-            )
-        )
-        # Create Payload Index for faster filtering
-        await client.create_payload_index(
-            collection_name=QDRANT_COLLECTION,
-            field_name="chat_id",
-            field_schema=qmodels.PayloadSchemaType.INTEGER
-        )
-
-        await client.create_payload_index(
-            collection_name=QDRANT_COLLECTION,
-            field_name="sender_name",
-            field_schema=qmodels.PayloadSchemaType.TEXT
-        )
-
-        await client.create_payload_index(
-            collection_name=QDRANT_COLLECTION,
-            field_name="timestamp",
-            field_schema=qmodels.PayloadSchemaType.DATETIME
-        )
-
+EMBED_BATCH_SIZE = 32
 
 
 @celery_app.task(name="src.app.services.embedding_worker.generate_embeddings_task", bind=True, acks_late=True)
 def generate_embeddings_task(self, chat_id: int):
-    """
-    Celery task to orchestrate intelligent ingestion into Qdrant.
-    """
+    """Celery task to orchestrate vector ingestion into VectorStore (ChromaDB)."""
     try:
-        log.info(f"Starting Qdrant Ingestion for Chat {chat_id}")
+        log.info("Starting Vector Ingestion for Chat %s", chat_id)
         asyncio.run(process_chat_ingestion(chat_id))
-        log.info(f"✅ Qdrant Ingestion finished for Chat {chat_id}")
+        log.info("✅ Vector Ingestion finished for Chat %s", chat_id)
     except Exception as e:
-        log.error(f"Embedding task failed for Chat {chat_id}: {e}", exc_info=True)
-        # Optional: self.retry(exc=e, countdown=60)
+        log.error("Embedding task failed for Chat %s: %s", chat_id, e, exc_info=True)
+
 
 async def process_chat_ingestion(chat_id: int):
-    client = AsyncQdrantClient(
-        url=str(settings.QDRANT_URL),
-        api_key=settings.QDRANT_API_KEY,
-        timeout = 60.0,
-        prefer_grpc=True
-    )
+    vector_store = get_vector_store()
 
-    
     try:
-        await _ensure_collection_exists(client)
-
         # 1. Hard Cap Check
-        count_filter = qmodels.Filter(
-            must=[qmodels.FieldCondition(key="chat_id", match=qmodels.MatchValue(value=chat_id))]
-        )
-        count_result = await client.count(QDRANT_COLLECTION, count_filter=count_filter)
-        
-        if count_result.count >= HARD_CAP_LIMIT:
-            log.warning(f"[Hard Cap] Chat {chat_id} has {count_result.count} vectors. Skipping.")
+        existing_count = await vector_store.count(where={"chat_id": {"$eq": chat_id}})
+        if existing_count >= HARD_CAP_LIMIT:
+            log.warning("[Hard Cap] Chat %s already has %d vectors. Skipping.", chat_id, existing_count)
             return
 
         # Calculate remaining quota
-        quota = HARD_CAP_LIMIT - count_result.count
+        quota = HARD_CAP_LIMIT - existing_count
         cutoff_aware = datetime.now(timezone.utc) - timedelta(days=HISTORY_LIMIT_DAYS)
         cutoff_date = cutoff_aware.replace(tzinfo=None)
-        
+
         async with AsyncSessionLocal() as db:
             # Update status to processing
             await crud.update_chat_embedding_status(
@@ -108,17 +57,12 @@ async def process_chat_ingestion(chat_id: int):
             )
 
             total_ingested = 0
-            
-            # We create a generator pipeline
-            # Generator -> Batches -> Concurrent Processing
-            
+
+            # Stream data in batches and upload
             async for batch in data_stream_generator(db, chat_id, cutoff_date, quota):
-                # Process a batch of text (e.g., 100 items)
-                
-                processed_count = await process_and_upload_batch(client, batch, chat_id)
+                processed_count = await process_and_upload_batch(vector_store, batch, chat_id)
                 total_ingested += processed_count
-                
-                # Check quota mid-stream to stop early if we hit the limit
+
                 quota -= processed_count
                 if quota <= 0:
                     break
@@ -127,54 +71,44 @@ async def process_chat_ingestion(chat_id: int):
             await crud.update_chat_embedding_status(
                 db, chat_id, schemas.EmbeddingStatusEnum.completed.value, should_commit=True
             )
-            log.info(f"✅ Ingestion Complete. Total {total_ingested} vectors for Chat {chat_id}")
+            log.info("✅ Ingestion Complete. Total %d vectors for Chat %s", total_ingested, chat_id)
 
     except Exception as e:
-        log.error(f"Error logic trace: {e}")
+        log.error("Error during chat vector ingestion: %s", e, exc_info=True)
         async with AsyncSessionLocal() as db:
             await crud.update_chat_embedding_status(
                 db, chat_id, schemas.EmbeddingStatusEnum.failed.value, should_commit=True
             )
         raise e
-    finally:
-        await client.close()
 
 
-async def data_stream_generator(db, chat_id: int, cutoff_date: datetime, max_items: int) -> AsyncGenerator[List[Dict], None]:
-    """
-    Yields batches of data (Messages + Segments) to be processed.
-    Uses LIMIT/OFFSET pagination to prevent OOM.
-    """
-    current_batch = []
+async def data_stream_generator(
+    db, chat_id: int, cutoff_date: datetime, max_items: int
+) -> AsyncGenerator[List[Dict[str, Any]], None]:
+    """Yields batches of data (Messages + Segments) to be processed."""
+    current_batch: List[Dict[str, Any]] = []
     total_processed_count = 0
-    
-    # ==========================================
+
     # PHASE 1: Process Messages
-    # ==========================================
     msg_offset = 0
-    
     while total_processed_count < max_items:
-        # Fetch batch from DB
         raw_msgs = await crud.get_messages_batch(
             db, chat_id=chat_id, limit=DB_BATCH_SIZE, offset=msg_offset, min_date=cutoff_date
         )
-        
         if not raw_msgs:
-            break # No more messages
+            break
 
         for msg in raw_msgs:
             if total_processed_count >= max_items:
                 break
 
-            # Junk Filter
             if not msg.content or len(msg.content.split()) < MIN_WORD_COUNT:
                 continue
 
-            # Timezone fix
             ts = msg.timestamp if msg.timestamp.tzinfo else msg.timestamp.replace(tzinfo=timezone.utc)
             participant_id = msg.participant_id
-            participant = msg.participant.name
-            # Add to buffer
+            participant = msg.participant.name if msg.participant else None
+
             current_batch.append({
                 "type": "message",
                 "id": msg.id,
@@ -182,49 +116,39 @@ async def data_stream_generator(db, chat_id: int, cutoff_date: datetime, max_ite
                 "timestamp": ts,
                 "source_table": "messages",
                 "participant_id": participant_id,
-                "sender_name": participant if participant else None
+                "sender_name": participant,
             })
             total_processed_count += 1
 
-            # Yield if buffer is full
             if len(current_batch) >= EMBED_BATCH_SIZE:
                 yield current_batch
                 current_batch = []
 
         msg_offset += DB_BATCH_SIZE
 
-    # ==========================================
     # PHASE 2: Process Segments
-    # ==========================================
-    # Only start if we haven't hit the hard cap yet
     if total_processed_count < max_items:
         seg_offset = 0
-        
         while total_processed_count < max_items:
-            # Fetch batch from DB
             raw_segs = await crud.get_segments_batch(
                 db, chat_id=chat_id, limit=DB_BATCH_SIZE, offset=seg_offset, min_date=cutoff_date
             )
-            
             if not raw_segs:
-                break # No more segments
+                break
 
             for seg in raw_segs:
                 if total_processed_count >= max_items:
                     break
-                
-                # Check for content existence
+
                 if not seg.combined_text:
                     continue
 
-                # Timezone fix (Segments usually link to TimeSegment)
-                # Ensure your CRUD eager loads 'time_segment'
-                seg_ts = seg.time_segment.start_time
+                seg_ts = seg.time_segment.start_time if seg.time_segment else datetime.now(timezone.utc)
                 if seg_ts.tzinfo is None:
                     seg_ts = seg_ts.replace(tzinfo=timezone.utc)
 
                 participant_id = seg.sender_id
-                participant = seg.participant.name
+                participant = seg.participant.name if seg.participant else None
 
                 current_batch.append({
                     "type": "segment",
@@ -233,67 +157,65 @@ async def data_stream_generator(db, chat_id: int, cutoff_date: datetime, max_ite
                     "timestamp": seg_ts,
                     "source_table": "segments_sender",
                     "participant_id": participant_id,
-                    "sender_name": participant if participant else None
-
+                    "sender_name": participant,
                 })
                 total_processed_count += 1
 
-                # Yield if buffer is full
                 if len(current_batch) >= EMBED_BATCH_SIZE:
                     yield current_batch
                     current_batch = []
 
             seg_offset += DB_BATCH_SIZE
 
-    # ==========================================
     # PHASE 3: Flush Remaining
-    # ==========================================
-    # Yield whatever is left in the buffer (even if it's just 1 item)
     if current_batch:
         yield current_batch
 
 
-async def process_and_upload_batch(client: AsyncQdrantClient, batch: List[Dict], chat_id: int) -> int:
-    """
-    Embeds texts and upserts to Qdrant. Returns count of uploaded items.
-    """
+async def process_and_upload_batch(vector_store: VectorStore, batch: List[Dict[str, Any]], chat_id: int) -> int:
+    """Embeds texts and upserts them to VectorStore."""
+    if not batch:
+        return 0
+
     texts = [item["text"] for item in batch]
-    
     try:
         embeddings = await embed_texts(texts)
     except Exception as e:
-        log.error(f"Embedding API failed: {e}")
+        log.error("Embedding generation failed: %s", e)
         return 0
 
-    points = []
+    ids: List[str] = []
+    documents: List[str] = []
+    metadatas: List[Dict[str, Any]] = []
+    valid_embeddings: List[List[float]] = []
+
     for i, item in enumerate(batch):
         embedding = embeddings[i]
-        if not embedding: continue
+        if not embedding:
+            continue
 
-        # Deterministic UUID
         point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{item['source_table']}_{item['id']}"))
-        
-        payload = {
-            "source_table": item["source_table"],
-            "source_id": item["id"],
-            "chat_id": chat_id,
-            "text": item["text"],
+        metadata = {
+            "source_table": str(item["source_table"]),
+            "source_id": int(item["id"]),
+            "chat_id": int(chat_id),
+            "text": str(item["text"]),
             "timestamp": item["timestamp"].isoformat(),
-            "participant_id": item.get("participant_id"),
-            "sender_name": item.get("sender_name")
+            "participant_id": int(item.get("participant_id") or 0),
+            "sender_name": str(item.get("sender_name") or "unknown"),
         }
 
-        points.append(qmodels.PointStruct(
-            id=point_id,
-            vector=embedding,
-            payload=payload
-        ))
+        ids.append(point_id)
+        documents.append(item["text"])
+        metadatas.append(metadata)
+        valid_embeddings.append(embedding)
 
-    if points:
-        await client.upsert(
-            collection_name=QDRANT_COLLECTION,
-            points=points,
-            wait=False # Fire and forget for speed
+    if ids:
+        await vector_store.upsert(
+            ids=ids,
+            embeddings=valid_embeddings,
+            metadatas=metadatas,
+            documents=documents,
         )
-    
-    return len(points)
+
+    return len(ids)

@@ -7,7 +7,7 @@ from sqlalchemy import text
 from typing import AsyncGenerator
 
 # Import app components
-from src.main import app  # Adjust import based on your actual main entry point
+from src.app.main import app
 from src.app.db.session import get_db, AsyncSessionLocal
 from src.app.security import get_current_user
 from src.app import models

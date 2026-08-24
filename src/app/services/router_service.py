@@ -1,87 +1,45 @@
+# src/app/services/router_service.py
+
 import logging
 import re
 import json
 import asyncio
-import tiktoken
-from typing import Dict, Any, List, AsyncGenerator, Union, Tuple, Optional
 import random
-from openai import RateLimitError
+from typing import Dict, Any, List, AsyncGenerator, Union, Tuple, Optional
 from datetime import datetime
+
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
-from langchain_openai import AzureChatOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from sqlalchemy.exc import (
     SQLAlchemyError,
     ProgrammingError,
     OperationalError,
-    DataError
+    DataError,
 )
+
 from src.app.config import settings
 from src.app.services.retrieval_service import retriever
+from src.app.services.llm_factory import (
+    get_router_llm,
+    get_context_llm,
+    get_main_llm_primary,
+    get_main_llm_fallback,
+    execute_resilient_llm,
+)
 from src.app.utils.serializers import serialize_analytics
-
-
 from src.app.schemas import EmbeddingStatusEnum
 from src.app import crud
+
 log = logging.getLogger(__name__)
 
-
-CTX_WINDOW_MAIN_4O = 32000     
-CTX_WINDOW_MAIN_4O_MINI = 8000
-
-router_llm = AzureChatOpenAI(
-    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_ROUTER,
-    api_version=settings.AZURE_OPENAI_API_VERSION_ROUTER,
-    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_ROUTER),
-    api_key=settings.AZURE_OPENAI_API_KEY_ROUTER,
-    temperature=0.0,
-    max_tokens=200
-)
-
-main_llm_primary = AzureChatOpenAI(
-    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_MAIN_4O,
-    api_version=settings.AZURE_OPENAI_API_VERSION_MAIN_4O,
-    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_MAIN_4O),
-    api_key=settings.AZURE_OPENAI_API_KEY_MAIN_4O,
-    temperature=0.2,
-    streaming=True 
-)
-
-main_llm_fallback = AzureChatOpenAI(
-    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_MAIN_4O_MINI,
-    api_version=settings.AZURE_OPENAI_API_VERSION_MAIN_4O_MINI,
-    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_MAIN_4O_MINI),
-    api_key=settings.AZURE_OPENAI_API_KEY_MAIN_4O_MINI,
-    temperature=0.2,
-    streaming=True
-)
-context_llm_fallback = AzureChatOpenAI(
-    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_CONTEXT_4O,
-    api_version=settings.AZURE_OPENAI_API_VERSION_CONTEXT_4O,
-    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_CONTEXT_4O),
-    api_key=settings.AZURE_OPENAI_API_KEY_CONTEXT_4O,
-    temperature=0.2,
-    max_tokens=500
-)
-
-# Fallback Context LLM (GPT-4 / Smaller model)
-context_llm = AzureChatOpenAI(
-    azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT_CONTEXT_4,
-    api_version=settings.AZURE_OPENAI_API_VERSION_CONTEXT_4,
-    azure_endpoint=str(settings.AZURE_OPENAI_ENDPOINT_CONTEXT_4),
-    api_key=settings.AZURE_OPENAI_API_KEY_CONTEXT_4,
-    temperature=0.2,
-    max_tokens=500
-)
-
 FORBIDDEN_KEYWORDS = {
-    'UPDATE', 'DELETE', 'INSERT', 'DROP', 'ALTER', 'TRUNCATE', 
-    'CREATE', 'GRANT', 'REVOKE', 'EXEC', 'pg_sleep'
+    "UPDATE", "DELETE", "INSERT", "DROP", "ALTER", "TRUNCATE",
+    "CREATE", "GRANT", "REVOKE", "EXEC", "pg_sleep",
 }
-FORBIDDEN_TABLES = {'users', 'chats', 'embeddings', 'conversation_history'}
+FORBIDDEN_TABLES = {"users", "chats", "embeddings", "conversation_history"}
 
 CONTEXTUALIZE_SYSTEM = """
 Given a chat history and the latest user question which might reference context in the chat history, 
@@ -97,17 +55,6 @@ History: [User: What did we say about sushi?]
 User: Summarize it.
 Standalone: Summarize the discussion about sushi.
 """
-
-contextualize_chain = (
-    ChatPromptTemplate.from_messages([
-        ("system", CONTEXTUALIZE_SYSTEM),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{question}"),
-    ])
-    | router_llm
-    | StrOutputParser()
-)
-
 
 DB_SCHEMA_CONTEXT = """
 PostgreSQL Schema (Analytics Scope):
@@ -210,7 +157,6 @@ Today's Date: {current_date}
 {question}
 """
 
-
 SQL_GENERATION_PROMPT = f"""
 You are a PostgreSQL Data Engineer. Generate a safe, read-only SQL query for the user question.
 
@@ -253,7 +199,8 @@ Your goal is to answer the user's questions directly and naturally.
 {rag_context}
 
 ### STRICT RESPONSE RULES (ANTI-LEAK)
-1. **Be Direct & Conversational:** - Never explain *how* you found the answer. 
+1. **Be Direct & Conversational:**
+   - Never explain *how* you found the answer.
    - BAD: "Based on the session flow..." or "Looking at the SQL results..."
    - GOOD: "John sent 182 messages."
 
@@ -267,31 +214,28 @@ Your goal is to answer the user's questions directly and naturally.
 4. **Citations (CRITICAL):**
    - **STRICT FORMAT:** You must use the format `[table_name:id]`.
    - **VARIABLE TABLE NAMES:** The `table_name` MUST match the source provided in the excerpts (usually `messages` or `segments_sender`).
-   
    - **FORBIDDEN:** Do NOT add words like "Source:", "Reference:", or "Ref:" inside the brackets.
    - **EXAMPLES:**
       - ✅ CORRECT (Message): "The user asked for help [messages:284619]"
       - ✅ CORRECT (Segment): "They discussed the scholarship deadline [segments_sender:4401]"
       - ❌ WRONG (Extra text): "The user asked for help [Source: messages:284619]"
-    - **MULTIPLE CITATIONS:** If citing multiple sources at same time, put them in ONE bracket separated by **COMMAS** or leave in separate brackets.
+   - **MULTIPLE CITATIONS:** If citing multiple sources at same time, put them in ONE bracket separated by **COMMAS** or leave in separate brackets.
       - ✅ CORRECT: `[messages:291521] [segments_sender:271355]`
       - ✅ CORRECT: `[messages:291521, segments_sender:271355]`
-      - ❌ WRONG (Semicolon): `[messages:291521; segments_sender:271355]`
-      
    - Only cite specific quotes from [CONVERSATION EXCERPTS]. Do not cite statistics.
 
 ### USER QUESTION
 {question}
 """
 
-# Regex Trap
 GREETING_PATTERNS = [
     r"^(hi|hello|hey|sup|greetings)\b",
     r"^who are you",
-    r"^what can you do"
+    r"^what can you do",
 ]
 
-def _check_fast_trap(query: str) -> str | None:
+
+def _check_fast_trap(query: str) -> Optional[str]:
     q = query.strip().lower()
     for p in GREETING_PATTERNS:
         if re.search(p, q):
@@ -300,70 +244,34 @@ def _check_fast_trap(query: str) -> str | None:
 
 
 async def generate_standalone_question(user_question: str, chat_history: List[BaseMessage]) -> str:
-    """
-    Generates a standalone question from user input and chat history
-    using primary and fallback context LLMs, with intelligent retries.
-    """
-    # 1. Format History for the Prompt
+    """Generates a standalone question from user input and chat history."""
+    if not chat_history:
+        return user_question
+
     history_str = ""
-    for msg in chat_history[-6:]:  # Keep context window manageable
+    for msg in chat_history[-6:]:
         role = "User" if isinstance(msg, HumanMessage) else "Assistant"
         history_str += f"{role}: {msg.content}\n"
 
-    # 2. Compose Prompt
     prompt_content = (
         f"Given the chat history:\n{history_str}\n"
         f"Rewrite the user's question as a standalone question:\n{user_question}"
     )
-    
-    messages = [HumanMessage(content=prompt_content)]
 
-    # 3. Execution with Backoff Strategy
-    retries = 0
-    max_retries = 5
-    base_delay = 0.5 
-
-    while retries <= max_retries:
-        try:
-            # Attempt 1: Primary LLM
-            response = await context_llm.ainvoke(messages)
-            return response.content.strip()
-        
-        except RateLimitError:
-            log.warning(f"Primary Context LLM Rate Limited. Attempting Fallback... (Retry {retries})")
-            try:
-                # Attempt 2: Fallback LLM
-                response = await context_llm_fallback.ainvoke(messages)
-                return response.content.strip()
-            
-            except RateLimitError:
-                # Both failed: Exponential Backoff
-                retries += 1
-                if retries > max_retries:
-                    break
-                
-                sleep_time = base_delay * (2 ** retries) + random.uniform(0, 0.2)
-                log.warning(f"Rate limit hit on both LLMs. Retrying in {sleep_time:.2f}s...")
-                await asyncio.sleep(sleep_time)
-        
-        except Exception as e:
-            # Catch non-rate-limit errors (e.g. Context Length exceeded) and log
-            log.error(f"Contextualization Error: {e}")
-            return user_question # Fail safe: return original question
-
-    # If all retries exhausted, return original question to allow flow to continue
-    log.error("Failed to contextualize question after maximum retries.")
-    return user_question
+    try:
+        context_llm = get_context_llm()
+        response = await context_llm.ainvoke([HumanMessage(content=prompt_content)])
+        return response.content.strip() if hasattr(response, "content") else str(response).strip()
+    except Exception as e:
+        log.error("Contextualization error: %s", e)
+        return user_question
 
 
-
-
-def _get_dashboard_capabilities(analytics_json: Dict[str, Any] | None) -> str:
+def _get_dashboard_capabilities(analytics_json: Optional[Dict[str, Any]]) -> str:
     if not analytics_json:
         return "caps:none"
 
     caps = ["caps:"]
-
     gen = analytics_json.get("general_dashboard")
     if gen:
         if gen.get("participants") is not None: caps.append("G:p")
@@ -388,168 +296,75 @@ def _get_dashboard_capabilities(analytics_json: Dict[str, Any] | None) -> str:
     return " ".join(caps) if len(caps) > 1 else "caps:none"
 
 
-def _calculate_dynamic_config(prompt_text: str):
-    """
-    Determines which model to use and the safe max_tokens value based on input size.
-    """
-    enc = tiktoken.get_encoding("cl100k_base")
-    prompt_tokens = len(enc.encode(prompt_text))
-    
-    # Logic: Prefer 4o, Fallback to Mini if context is too tight (or explicitly switched later)
-    # Note: You can adjust this threshold. Here we use 4o unless it's getting full, 
-    # but the retry logic below handles the cost/rate-limit fallback.
-    
-    # Calculate available tokens for 4o
-    if prompt_tokens < (CTX_WINDOW_MAIN_4O - 1000):
-        # Default to Primary
-        llm = main_llm_primary
-        safe_max_tokens = CTX_WINDOW_MAIN_4O - prompt_tokens - 500
-    else:
-        # Fallback immediately if prompt is massive
-        llm = main_llm_fallback
-        safe_max_tokens = min(CTX_WINDOW_MAIN_4O_MINI - prompt_tokens - 200, 4096)
-
-    # Cap max_tokens to avoid crazy outputs
-    if safe_max_tokens > 4096: 
-        safe_max_tokens = 4096
-        
-    return llm, safe_max_tokens, prompt_tokens
-
-async def execute_resilient_main_llm(
-    prompt_messages: List[BaseMessage], 
-    stream: bool = False
-) -> Union[str, AsyncGenerator[str, None]]:
-    """
-    Executes LLM call with:
-    1. Dynamic Token Calculation
-    2. Primary -> Fallback Model Switching
-    3. Exponential Backoff for Rate Limits
-    """
-    
-    # Convert messages to string for token counting
-    msg_texts = []
-    for m in prompt_messages:
-        if hasattr(m, 'content'):
-            msg_texts.append(m.content)
-        elif isinstance(m, tuple) and len(m) >= 2:
-            msg_texts.append(str(m[1]))
-        elif isinstance(m, str):
-            msg_texts.append(m)
-        else:
-            msg_texts.append(str(m))
-    
-    full_text = " ".join(msg_texts)
-    
-    # Initial Config
-    current_llm, dynamic_max, _ = _calculate_dynamic_config(full_text)
-    
-    retries = 0
-    max_retries = 5
-    base_delay = 0.5
-
-    while retries <= max_retries:
-        try:
-            # Apply Dynamic Max Tokens (Create a copy/runtime config if needed, 
-            # but binding directly works for single-request scope in standard usage)
-            # Langchain invoke accepts `max_tokens` in bind or call options usually, 
-            # but modifying the object property is the direct way per your pseudo-code.
-            current_llm.max_tokens = dynamic_max
-
-            if stream:
-                # For Streaming (Final Answer) - return the generator immediately
-                # Note: If rate limit hits *during* stream, it raises error in the consumption loop.
-                # This try/catch primarily protects the connection establishment.
-                return current_llm.astream(prompt_messages)
-            else:
-                # For Standard (SQL)
-                response = await current_llm.ainvoke(prompt_messages)
-                return response.content
-
-        except RateLimitError:
-            log.warning(f"Rate Limit Hit on {current_llm.azure_deployment}. Retries: {retries}")
-            
-            # Switch Strategy: If on Primary, downgrade to Fallback
-            if current_llm == main_llm_primary:
-                log.info("Switching to Fallback Model (Mini)...")
-                current_llm = main_llm_fallback
-                # Recalculate max tokens for the smaller model
-                _, _, p_tokens = _calculate_dynamic_config(full_text)
-                dynamic_max = min(CTX_WINDOW_MAIN_4O_MINI - p_tokens - 200, 4096)
-            else:
-                # Already on fallback, just backoff
-                retries += 1
-                sleep_time = base_delay * (2 ** retries) + random.uniform(0, 0.2)
-                await asyncio.sleep(sleep_time)
-        
-        except Exception as e:
-            log.error(f"LLM Execution Error: {e}")
-            raise e # Non-rate-limit errors should bubble up
-
-    raise Exception("Main LLM failed after maximum retries.")
-
-
 async def validate_sql_safety(sql: str) -> str:
-    """
-    Static analysis of SQL string to prevent destructive or unauthorized queries.
-    Returns the cleaned SQL if safe, raises ValueError if unsafe.
-    """
-    normalized_sql = sql.strip().strip(';').replace('\n', ' ')
+    normalized_sql = sql.strip().strip(";").replace("\n", " ")
     upper_sql = normalized_sql.upper()
 
-    # Destructive Command Check
     for keyword in FORBIDDEN_KEYWORDS:
-        if re.search(r'\b' + keyword + r'\b', upper_sql):
+        if re.search(r"\b" + keyword + r"\b", upper_sql):
             raise ValueError(f"Security Alert: Query contains forbidden keyword '{keyword}'")
-    # Forbidden Table Check
-    for table in FORBIDDEN_TABLES:
-        if re.search(r'\b' + table + r'\b', sql.lower()):
-             raise ValueError(f"Security Alert: Access to restricted table '{table}' is denied.")
 
-    # Scope Enforcement
+    for table in FORBIDDEN_TABLES:
+        if re.search(r"\b" + table + r"\b", sql.lower()):
+            raise ValueError(f"Security Alert: Access to restricted table '{table}' is denied.")
+
     if ":chat_id" not in sql:
         raise ValueError("Security Alert: Query failed to bind 'chat_id' parameter.")
 
-    # Performance Governor (Auto-Limit)
     if "LIMIT" not in upper_sql:
         normalized_sql += " LIMIT 20"
-        log.warning("[SQL Agent] LLM forgot LIMIT. Injected 'LIMIT 20'.")
-    else:
-        pass
 
     return normalized_sql
+
+
+def _extract_json_payload(raw_text: str) -> Optional[Dict[str, Any]]:
+    if not raw_text:
+        return None
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", str(raw_text), flags=re.IGNORECASE).strip()
+    match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", cleaned)
+    if match:
+        cleaned = match.group(1).strip()
+    else:
+        first_brace = cleaned.find("{")
+        last_brace = cleaned.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            cleaned = cleaned[first_brace:last_brace + 1].strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return None
+
 
 async def generate_and_execute_sql(query: str, chat_id: int, db: AsyncSession) -> str:
     safe_sql = "N/A"
     try:
         prompt_template = ChatPromptTemplate.from_template(SQL_GENERATION_PROMPT)
         prompt_messages = prompt_template.format_messages(question=query)
-        raw_response = await execute_resilient_main_llm(prompt_messages, stream=False)
-        cleaned_json = raw_response.strip().replace('```json', '').replace('```', '')
-        try:
-            parsed = json.loads(cleaned_json)
-        except json.JSONDecodeError:
-            log.warning(f"[SQL Agent] Failed to parse JSON: {raw_response}")
+
+        router_llm = get_router_llm()
+        raw_response = await router_llm.ainvoke(prompt_messages)
+        content_str = raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+
+        parsed = _extract_json_payload(content_str)
+        if not parsed:
+            log.warning("[SQL Agent] Failed to parse JSON: %s", content_str)
             return "REFUSE"
 
         if not parsed.get("valid_sql", False):
             return "REFUSE"
 
         sql_query = parsed.get("sql", "")
-        # Extract Reasoning
         reasoning = parsed.get("reasoning", "Database Query Result")
-        
-        log.info(f"[SQL Agent] Generated: {sql_query} | Reasoning: {reasoning}")
+        log.info("[SQL Agent] Generated: %s | Reasoning: %s", sql_query, reasoning)
 
         safe_sql = await validate_sql_safety(sql_query)
-
         stmt = text(safe_sql)
         result = await db.execute(stmt, {"chat_id": chat_id})
         rows = result.fetchall()
-        
+
         if not rows:
             return f"[QUERY GOAL: {reasoning}] RESULT: No records found."
-        
-        # Unwrap Logic
+
         formatted_data = str(rows[:20])
         if len(rows) == 1 and len(rows[0]) == 1:
             formatted_data = str(rows[0][0])
@@ -558,111 +373,149 @@ async def generate_and_execute_sql(query: str, chat_id: int, db: AsyncSession) -
 
         return f"[QUERY GOAL: {reasoning}] RESULT: {formatted_data}"
 
-    except ProgrammingError as e:
-        await db.rollback()
-        
-        error_details = str(e.orig) if hasattr(e, 'orig') else str(e)
-        log.warning(f"[SQL Agent] Bad SQL generated. Query: {safe_sql} | Error: {error_details}")
-        
-        return "REFUSE"
-    except OperationalError as e:
-        await db.rollback()
-        log.error(f"[SQL Agent] DB Operational Error (Connection/Timeout): {e}")
-        return "REFUSE"
-
-    except DataError as e:
-        await db.rollback()
-        log.warning(f"[SQL Agent] Data processing error: {e}")
-        return "REFUSE"
-
-    except SQLAlchemyError as e:
-        # Catch-all for other DB errors
-        await db.rollback()
-        log.error(f"[SQL Agent] Generic DB Error: {e}")
-        return "REFUSE"
-
     except Exception as e:
-        # Non-DB errors 
-        try:
-            await db.rollback()
-        except:
-            pass 
-            
-        log.critical(f"[SQL Agent] Critical Python Error: {e}", exc_info=True)
+        await db.rollback()
+        log.warning("[SQL Agent] DB or Execution error: %s", e)
         return "REFUSE"
+
 
 async def run_vector_search(
-        query: str, 
-        chat_id: int,
-        sender_names: Optional[List[str]] = None,
-        time_ranges: Optional[List[Tuple[datetime, datetime]]] = None
+    query: str,
+    chat_id: int,
+    sender_names: Optional[List[str]] = None,
+    time_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
 ):
-    docs = await retriever.aget_relevant_documents(query, chat_id, sender_names=sender_names, time_ranges=time_ranges)
-    
+    docs = await retriever.aget_relevant_documents(
+        query, chat_id, sender_names=sender_names, time_ranges=time_ranges
+    )
     if not docs:
-        
-        return [], [], None 
-        
+        return [], [], None
+
     sources_list = [
-        {"source_table": s.source_table, "source_id": s.source_id, "distance": s.distance, "text": s.text, "sender_name": s.sender_name, "timestamp": s.timestamp} 
+        {
+            "source_table": s.source_table,
+            "source_id": s.source_id,
+            "distance": s.distance,
+            "text": s.text,
+            "sender_name": s.sender_name,
+            "timestamp": s.timestamp,
+        }
         for s in docs
     ]
-    
-    context_text = "\n\n".join([f"[{d.source_table}:{d.source_id}, message_sender: {d.sender_name}, time_sent: {d.timestamp}] {d.text}" for d in docs])
-    
+
+    context_text = "\n\n".join([
+        f"[{d.source_table}:{d.source_id}, message_sender: {d.sender_name}, time_sent: {d.timestamp}] {d.text}"
+        for d in docs
+    ])
+
     return docs, sources_list, context_text
 
 
+async def extract_search_filters(query: str) -> Dict[str, Any]:
+    current_date = datetime.now().isoformat()
+    try:
+        prompt_template = ChatPromptTemplate.from_template(FILTER_EXTRACTION_PROMPT)
+        prompt_messages = prompt_template.format_messages(
+            current_date=current_date, question=query
+        )
+
+        router_llm = get_router_llm()
+        raw_response = await router_llm.ainvoke(prompt_messages)
+        content_str = raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+
+        parsed = _extract_json_payload(content_str)
+        if not parsed:
+            return {}
+
+        final_filters: Dict[str, Any] = {}
+        if parsed.get("sender_names"):
+            final_filters["sender_names"] = parsed["sender_names"]
+
+        if parsed.get("time_ranges"):
+            processed_ranges = []
+            for range_pair in parsed["time_ranges"]:
+                if isinstance(range_pair, list) and len(range_pair) == 2:
+                    try:
+                        s_dt = datetime.fromisoformat(range_pair[0])
+                        e_dt = datetime.fromisoformat(range_pair[1])
+                        processed_ranges.append((s_dt, e_dt))
+                    except ValueError:
+                        continue
+            if processed_ranges:
+                final_filters["time_ranges"] = processed_ranges
+
+        return final_filters
+    except Exception as e:
+        log.warning("[Filter Extraction] Failed: %s", e)
+        return {}
+
+
+def _sanitize_sources(sources: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    if not sources:
+        return []
+
+    cleaned = []
+    for src in sources:
+        if hasattr(src, "model_dump"):
+            data = src.model_dump()
+        elif hasattr(src, "dict"):
+            data = src.dict()
+        elif isinstance(src, dict):
+            data = src.copy()
+        else:
+            continue
+
+        if "timestamp" in data and isinstance(data["timestamp"], datetime):
+            data["timestamp"] = data["timestamp"].isoformat()
+
+        cleaned.append(data)
+    return cleaned
+
+
+async def _save_turn(db: AsyncSession, chat_id: int, q: str, a: str, sources: List[Dict[str, Any]]):
+    try:
+        await crud.add_conversation_turn(
+            db, chat_id=chat_id, user_q=q, ai_a=a, sources=sources
+        )
+    except Exception as e:
+        log.error("Failed to save conversation turn for chat %s: %s", chat_id, e)
 
 
 async def route_and_process(
-    query: str, 
-    analytics_json: Dict[str, Any] | None, 
+    query: str,
+    analytics_json: Optional[Dict[str, Any]],
     chat_id: int,
     db: AsyncSession,
-    chat_history: List[BaseMessage]
+    chat_history: List[BaseMessage],
 ) -> AsyncGenerator[str, None]:
-    """
-    The Main Entry Point. Yields chunks of the answer (SSE format).
-    Final yield is the structured JSON with metadata (RagQueryResponse).
-    """
+    """Main RAG Entry Point. Yields SSE event stream chunks."""
     fast_response = _check_fast_trap(query)
     if fast_response:
         yield f"data: {json.dumps(fast_response)}\n\n"
-    
         await _save_turn(db, chat_id, query, fast_response, [])
-
         final_payload = {"answer": fast_response, "route": "TIER_1_FAST", "sources": []}
         yield f"data: {json.dumps(final_payload)}\n\n"
         return
-    
+
     standalone_question = query
     if chat_history:
         standalone_question = await generate_standalone_question(query, chat_history)
-        log.info(f"Contextualized: '{query}' -> '{standalone_question}'")
+        log.info("Contextualized: '%s' -> '%s'", query, standalone_question)
 
-    # --- SESSION CONTEXT FORMATTING (FIXED) ---
     chat_context_str = ""
     if chat_history:
-        recent_history = chat_history[-6:] 
+        recent_history = chat_history[-6:]
         formatted_turns = []
         for msg in recent_history:
             role = "User" if isinstance(msg, HumanMessage) else "SentimentScope"
-            # Truncate content for token safety
             content = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content
             formatted_turns.append(f"{role}: {content}")
         chat_context_str = "\n".join(formatted_turns)
-    else:
-        # Pass empty string instead of "No history" to prevent LLM from commenting on it
-        chat_context_str = ""
-    
 
     status_str = await crud.get_chat_embedding_status(db, chat_id)
-    
-    is_sql_ready = (status_str is not None)
+    is_sql_ready = status_str is not None
     has_dashboard = analytics_json is not None
-    is_embeddings_ready = (status_str == EmbeddingStatusEnum.completed.value)
-    
+    is_embeddings_ready = status_str == EmbeddingStatusEnum.completed.value
     dashboard_caps = _get_dashboard_capabilities(analytics_json)
 
     intent = "vector_search"
@@ -672,22 +525,20 @@ async def route_and_process(
             "sql_ready": is_sql_ready,
             "embeddings_ready": is_embeddings_ready,
             "dashboard_ready": has_dashboard,
-            "dashboard_capabilities": dashboard_caps # Inject guidance
+            "dashboard_capabilities": dashboard_caps,
         }
-        
+
+        router_llm = get_router_llm()
         raw_class = await (
-            ChatPromptTemplate.from_template(ROUTER_SYSTEM_PROMPT) | router_llm | StrOutputParser()
+            ChatPromptTemplate.from_template(ROUTER_SYSTEM_PROMPT)
+            | router_llm
+            | StrOutputParser()
         ).ainvoke(router_input)
-        
-        # Strip Markdown to fix the "Router failed: Expecting value" error
-        cleaned_router = raw_class.strip().replace('```json', '').replace('```', '')
-        parsed_intent = json.loads(cleaned_router)
-        intent = parsed_intent.get("intent", "vector_search")
 
-
+        parsed_intent = _extract_json_payload(raw_class)
+        intent = parsed_intent.get("intent", "vector_search") if parsed_intent else "vector_search"
     except Exception as e:
-        log.warning(f"Router failed: {e}")
-
+        log.warning("Router classification failed: %s", e)
         if is_embeddings_ready:
             intent = "vector_search"
         elif is_sql_ready:
@@ -695,26 +546,20 @@ async def route_and_process(
         else:
             intent = "system_not_ready"
 
-    log.info(f"Router Decision: {intent} (SQL: {is_sql_ready}, Embeddings: {is_embeddings_ready})")
+    log.info("Router Decision: %s (SQL: %s, Embeddings: %s)", intent, is_sql_ready, is_embeddings_ready)
 
     answer_accum = ""
-    sources_list = []
-    
+    sources_list: List[Dict[str, Any]] = []
     structured_data = "None"
     rag_context = None
-    
-    
-    try:
-        if intent == "system_not_ready":
-             pass 
 
+    try:
         if intent in ["analytics_dashboard", "hybrid_query"] and has_dashboard:
             raw_stats = serialize_analytics(analytics_json)
-            
             if len(raw_stats) > 20000:
                 raw_stats = raw_stats[:20000] + "..."
-            
             structured_data = f"DASHBOARD STATS:\n{raw_stats}"
+
         if intent in ["sql_agent", "hybrid_query"] and is_sql_ready:
             sql_res = await generate_and_execute_sql(standalone_question, chat_id, db)
             if sql_res != "REFUSE":
@@ -726,147 +571,48 @@ async def route_and_process(
         if intent in ["vector_search", "hybrid_query", "sql_agent", "general"] and is_embeddings_ready:
             search_filters = await extract_search_filters(standalone_question)
             if search_filters:
-                log.info(f"Applying filters: {search_filters}")
+                log.info("Applying filters: %s", search_filters)
 
-            _, sources_list, rag_context = await run_vector_search(standalone_question, chat_id, sender_names=search_filters.get("sender_names"), time_ranges=search_filters.get("time_ranges"))
-            
+            _, sources_list, rag_context = await run_vector_search(
+                standalone_question,
+                chat_id,
+                sender_names=search_filters.get("sender_names"),
+                time_ranges=search_filters.get("time_ranges"),
+            )
+
         prompt_inputs = {
             "structured_data": structured_data,
-            "rag_context": rag_context if rag_context else "", 
-            "chat_context": chat_context_str, 
-            "question": standalone_question
+            "rag_context": rag_context if rag_context else "",
+            "chat_context": chat_context_str,
+            "question": standalone_question,
         }
-        
-        # Format messages using the Template
-        final_messages = ChatPromptTemplate.from_template(MASTER_SYSTEM_PROMPT).format_messages(**prompt_inputs)
+
+        final_messages = ChatPromptTemplate.from_template(MASTER_SYSTEM_PROMPT).format_messages(
+            **prompt_inputs
+        )
 
         try:
-            # EXECUTE RESILIENT STREAM
-            stream_generator = await execute_resilient_main_llm(final_messages, stream=True)
-            
-            # Consume Stream
+            stream_generator = await execute_resilient_llm(final_messages, stream=True)
             async for chunk in stream_generator:
-                # Langchain stream yields ChatGenerationChunk, we need the content
-                content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
                 answer_accum += content
                 yield f"data: {json.dumps(content)}\n\n"
-
         except Exception as e:
-            log.error(f"Streaming Error: {e}")
+            log.error("Streaming error: %s", e)
             yield f"data: {json.dumps('System is busy. Please try again.')}\n\n"
 
         if answer_accum:
+            sanitized_sources = _sanitize_sources(sources_list)
+            await _save_turn(db, chat_id, query, answer_accum, sanitized_sources)
 
-            sources_list = _sanitize_sources(sources_list)
-            await _save_turn(db, chat_id, query, answer_accum, sources_list)
-            
         final_resp = {
             "answer": answer_accum,
             "route": intent.upper(),
-            "sources": sources_list 
+            "sources": _sanitize_sources(sources_list),
         }
         yield f"data: {json.dumps(final_resp)}\n\n"
 
     except Exception as e:
-        log.error(f"Routing Error: {e}", exc_info=True)
+        log.error("Routing execution error: %s", e, exc_info=True)
         err_msg = "I encountered an error processing your request."
         yield f"data: {json.dumps(err_msg)}\n\n"
-
-
-
-async def _save_turn(
-    db: AsyncSession,
-    chat_id: int,
-    q: str,
-    a: str,
-    sources: List[Dict[str, Any]]
-):
-    """"Helper to persist conversation turn safely."""
-    try: 
-        await crud.add_conversation_turn(
-            db,
-            chat_id=chat_id,
-            user_q=q,
-            ai_a=a,
-            sources=sources
-        )
-    except Exception as e:
-        log.error(f"Failed to save conversation turn for chat {chat_id}: {e}")
-
-
-
-
-
-async def extract_search_filters(query: str) -> Dict[str, Any]:
-    """
-    Uses the main LLM to extract metadata filters (senders, dates) from the query.
-    Returns a dict compatible with retrieval_service arguments.
-    """
-    current_date = datetime.now().isoformat()
-    
-    try:
-        prompt_template = ChatPromptTemplate.from_template(FILTER_EXTRACTION_PROMPT)
-        prompt_messages = prompt_template.format_messages(
-            current_date=current_date, 
-            question=query
-        )
-        
-        raw_response = await execute_resilient_main_llm(prompt_messages, stream=False)
-        
-        cleaned_json = raw_response.strip().replace('```json', '').replace('```', '')
-        parsed = json.loads(cleaned_json)
-
-        final_filters = {}
-    
-        if parsed.get("sender_names"):
-            final_filters["sender_names"] = parsed["sender_names"]
-            
-        if parsed.get("time_ranges"):
-            processed_ranges = []
-            for range_pair in parsed["time_ranges"]:
-                if isinstance(range_pair, list) and len(range_pair) == 2:
-                    try:
-                        s_dt = datetime.fromisoformat(range_pair[0])
-                        e_dt = datetime.fromisoformat(range_pair[1])
-                        processed_ranges.append((s_dt, e_dt))
-                    except ValueError:
-                        continue 
-            
-            if processed_ranges:
-                final_filters["time_ranges"] = processed_ranges
-
-        return final_filters
-
-    except Exception as e:
-        log.warning(f"[Filter Extraction] Failed: {e}")
-        return {}
-
-
-def _sanitize_sources(sources: Optional[List[Any]]) -> List[Dict[str, Any]]:
-    """
-    Converts a list of RagSource objects (or dicts) into JSON-safe dictionaries.
-    Specifically converts 'datetime' objects to ISO strings.
-    """
-    if not sources:
-        return []
-        
-    cleaned = []
-    for src in sources:
-        # 1. Convert Pydantic models to dicts if necessary
-        if hasattr(src, "model_dump"):  # Pydantic v2
-            data = src.model_dump()
-        elif hasattr(src, "dict"):      # Pydantic v1
-            data = src.dict()
-        elif isinstance(src, dict):
-            data = src.copy()
-        else:
-            continue # Skip unknown types
-
-        # 2. Serialize datetime to String
-        # Check if 'timestamp' exists and is a datetime object
-        if "timestamp" in data and isinstance(data["timestamp"], datetime):
-            data["timestamp"] = data["timestamp"].isoformat()
-            
-        cleaned.append(data)
-        
-    return cleaned

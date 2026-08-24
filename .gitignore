@@ -56,13 +56,26 @@ reports/
 sample_data/
 inst/
 *.log
+data/
+data/*
 
-# Models
+# Models and Quantized Weights
 models/
+models/*
+afro_mini_onnx/
+afro_mini_onnx_int8/
+sentiment_onnx_int8/
 *.onnx
+*.onnx_data
 
 # Secrets and Configs
 .env
+.env.*
+!.env.example
 
-# OS Files
+# OS and IDE Files
 .DS_Store
+.vscode/
+.idea/
+
+scripts/
