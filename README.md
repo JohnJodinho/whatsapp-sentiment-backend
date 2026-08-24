@@ -1,4 +1,4 @@
-# SentimentScope — Enterprise-Grade Agentic RAG & Multi-Lingual Sentiment Intelligence Engine
+# SentimentScope — Agentic RAG & Multi-Lingual Sentiment Intelligence Engine
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
