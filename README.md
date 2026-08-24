@@ -30,49 +30,55 @@ An asynchronous, production-grade AI backend for WhatsApp chat analytics, multi-
 
 ```mermaid
 graph TD
-    Client[Web UI / Client Application]
+    Client["Client / Web UI"]
 
-    subgraph API Layer [FastAPI Application Layer]
-        AuthRouter[Auth & Security Router]
-        UploadRouter[Uploads & Parsing Router]
-        ChatRouter[Chat Lifecycle Router]
-        RAGRouter[Agentic RAG Streaming Router]
-        SSERouter[SSE Progress Router]
-        DashRouter[Dashboard Metrics Router]
+    subgraph APILayer ["FastAPI Application Layer"]
+        AuthRouter["Auth & Security Router"]
+        UploadRouter["Uploads & Parsing Router"]
+        ChatRouter["Chat Lifecycle Router"]
+        RAGRouter["Agentic RAG Streaming Router"]
+        SSERouter["SSE Progress Router"]
+        DashRouter["Dashboard Metrics Router"]
     end
 
-    subgraph Service Layer [Business Logic & Orchestration]
-        AuthSvc[Security & JWT Service]
-        ParseSvc[WhatsApp Parser Engine]
-        RouterSvc[Multi-Tier Router Service]
-        RetrieverSvc[VectorStore Retriever]
-        SummarySvc[Groq Summary Service]
-        CleanupSvc[User/Chat Cleanup Service]
+    subgraph ServiceLayer ["Business Logic & Orchestration"]
+        AuthSvc["Security & JWT Service"]
+        ParseSvc["WhatsApp Parser Engine"]
+        RouterSvc["Multi-Tier Router Service"]
+        RetrieverSvc["VectorStore Retriever"]
+        SummarySvc["Groq Summary Service"]
+        CleanupSvc["User/Chat Cleanup Service"]
     end
 
-    subgraph Inference Layer [Local CPU ONNX Runtime]
+    subgraph InferenceLayer ["Local CPU ONNX Runtime"]
         SentimentModel["Sentiment Classifier: JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment (INT8 ONNX)"]
         EmbeddingModel["Dense Embedder: Davlan/afro-xlmr-mini (INT8 ONNX, 384d)"]
     end
 
-    subgraph Generation Layer [Groq Cloud Engine]
+    subgraph GenerationLayer ["Groq Cloud Engine"]
         GroqRouter["Router & SQL: qwen/qwen3.6-27b"]
         GroqPrimary["Primary Synthesis: openai/gpt-oss-120b"]
         GroqFallback["Fallback LLM: openai/gpt-oss-20b"]
     end
 
-    subgraph Storage Layer [Persistence & Caching]
-        PostgreSQL[(Supabase PostgreSQL / Relational DB)]
-        Redis[(Redis Broker & Pub/Sub)]
-        VectorDB[(ChromaDB: Local Persistent / Chroma Cloud)]
+    subgraph StorageLayer ["Persistence & Caching"]
+        PostgreSQL[("Supabase PostgreSQL / Relational DB")]
+        Redis[("Redis Broker & Pub/Sub")]
+        VectorDB[("ChromaDB: Local Persistent / Chroma Cloud")]
     end
 
-    subgraph Worker Layer [Asynchronous Celery Workers]
-        SentimentWorker[Sentiment Processing Worker]
-        EmbeddingWorker[Vector Ingestion Worker]
+    subgraph WorkerLayer ["Asynchronous Celery Workers"]
+        SentimentWorker["Sentiment Processing Worker"]
+        EmbeddingWorker["Vector Ingestion Worker"]
     end
 
-    Client -->|HTTP / SSE| API Layer
+    Client --> AuthRouter
+    Client --> UploadRouter
+    Client --> ChatRouter
+    Client --> RAGRouter
+    Client --> SSERouter
+    Client --> DashRouter
+
     UploadRouter --> ParseSvc
     ParseSvc --> PostgreSQL
 
@@ -104,7 +110,7 @@ graph TD
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User
+    actor User as User
     participant API as FastAPI Router
     participant LLMRouter as Groq Router (qwen3.6-27b)
     participant SQL as Supabase PostgreSQL
