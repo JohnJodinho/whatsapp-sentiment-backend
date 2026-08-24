@@ -1,28 +1,17 @@
-# SentimentScope Backend
+# SentimentScope — Enterprise-Grade Agentic RAG & Multi-Lingual Sentiment Intelligence Engine
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-FF6F00?style=for-the-badge&logo=chroma&logoColor=white)](https://www.trychroma.com/)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-005C84?style=for-the-badge&logo=onnx&logoColor=white)](https://onnxruntime.ai/)
 [![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge&logo=groq&logoColor=white)](https://groq.com/)
-[![Celery](https://img.shields.io/badge/celery-%23a9cc54.svg?style=for-the-badge&logo=celery&logoColor=fdd835)](https://docs.celeryq.dev/en/stable/)
-[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
+[![Celery](https://img.shields.io/badge/Celery-%23a9cc54.svg?style=for-the-badge&logo=celery&logoColor=fdd835)](https://docs.celeryq.dev/en/stable/)
+[![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
-An asynchronous, production-grade AI backend for WhatsApp chat analytics, multi-tiered Agentic RAG, and CPU-optimized local INT8 ONNX inference for sentiment analysis and dense embeddings.
+**SentimentScope** is a high-throughput, cloud-native backend engine engineered for conversational data processing, low-latency multi-lingual NLP inference, and multi-tier agentic retrieval-augmented generation (RAG). 
 
----
-
-## 🎯 Core Capabilities
-
-- **Chat Intelligence & Parsing:** Ingests raw WhatsApp `.txt` exports and converts unstructured conversation logs into structured relational models (Messages, Time Segments, Sender Segments, Participants).
-- **Nigerian Pidgin & English Sentiment Analysis:** Powered by **`JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment`** (`v1/onnx_int8/`) running on ONNX Runtime CPU (`CPUExecutionProvider`) with dynamic `id2label` mapping and Celery batch execution.
-- **Zero External Latency Embeddings:** Computes 384-dimensional dense vectors locally using **`Davlan/afro-xlmr-mini` INT8 ONNX** with attention-masked mean pooling and L2 normalization.
-- **Unified Vector Storage (ChromaDB / Chroma Cloud):** `VectorStore` abstraction supporting local persistent storage (`PersistentClient`) and stateless cloud deployments (`CloudClient`).
-- **High-Throughput Groq LLM Engine:**
-  - **`openai/gpt-oss-120b`**: Primary RAG answer synthesis and reasoning.
-  - **`openai/gpt-oss-20b`**: Conversational contextualizer and resilient fallback.
-  - **`qwen/qwen3.6-27b`**: Query intent classification, metadata filter extraction, and safe parameter-bound SQL generation.
-- **Real-Time Streaming & Observability:** Server-Sent Events (SSE) and Redis Pub/Sub for live token streaming and task progress tracking.
+The platform pairs **local INT8-quantized ONNX models running on CPU** (for zero external embedding latency and cost-effective sentiment classification) with a **Groq-accelerated multi-model LLM generation tier**, backed by an asynchronous event-driven Celery/Redis pipeline and scalable PostgreSQL/ChromaDB storage.
 
 ---
 
@@ -30,46 +19,46 @@ An asynchronous, production-grade AI backend for WhatsApp chat analytics, multi-
 
 ```mermaid
 graph TD
-    Client["Client / Web UI"]
+    Client["Client Application / Web Frontend"]
 
-    subgraph APILayer ["FastAPI Application Layer"]
+    subgraph APILayer ["FastAPI Ingestion & Orchestration Layer"]
         AuthRouter["Auth & Security Router"]
-        UploadRouter["Uploads & Parsing Router"]
-        ChatRouter["Chat Lifecycle Router"]
-        RAGRouter["Agentic RAG Streaming Router"]
-        SSERouter["SSE Progress Router"]
-        DashRouter["Dashboard Metrics Router"]
+        UploadRouter["Chat Ingestion & Stream Parser"]
+        ChatRouter["Chat Lifecycle & Management"]
+        RAGRouter["Agentic RAG Engine (SSE Stream)"]
+        SSERouter["Live Progress Event Stream"]
+        DashRouter["Analytics & Aggregations"]
     end
 
-    subgraph ServiceLayer ["Business Logic & Orchestration"]
-        AuthSvc["Security & JWT Service"]
-        ParseSvc["WhatsApp Parser Engine"]
-        RouterSvc["Multi-Tier Router Service"]
-        RetrieverSvc["VectorStore Retriever"]
-        SummarySvc["Groq Summary Service"]
-        CleanupSvc["User/Chat Cleanup Service"]
+    subgraph ServiceLayer ["Orchestration & Business Logic Layer"]
+        AuthSvc["JWT Auth & Security Service"]
+        ParseSvc["Log Ingestion & Structuring Engine"]
+        RouterSvc["Hierarchical Agentic Router"]
+        RetrieverSvc["Scoped VectorStore Retriever"]
+        SummarySvc["Groq LLM Summarization Service"]
+        CleanupSvc["Asynchronous Lifecycle & Cleanup"]
     end
 
-    subgraph InferenceLayer ["Local CPU ONNX Runtime"]
+    subgraph InferenceLayer ["Local MLOps: Quantized ONNX Runtime (CPU)"]
         SentimentModel["Sentiment Classifier: JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment (INT8 ONNX)"]
-        EmbeddingModel["Dense Embedder: Davlan/afro-xlmr-mini (INT8 ONNX, 384d)"]
+        EmbeddingModel["Dense Embedder: Davlan/afro-xlmr-mini (INT8 ONNX, 384d, L2 Norm)"]
     end
 
-    subgraph GenerationLayer ["Groq Cloud Engine"]
-        GroqRouter["Router & SQL: qwen/qwen3.6-27b"]
-        GroqPrimary["Primary Synthesis: openai/gpt-oss-120b"]
-        GroqFallback["Fallback LLM: openai/gpt-oss-20b"]
+    subgraph GenerationLayer ["High-Throughput Groq LLM Fleet"]
+        GroqRouter["Router & SQL Generator: qwen/qwen3.6-27b"]
+        GroqPrimary["Primary Synthesis Engine: openai/gpt-oss-120b"]
+        GroqFallback["Resilient Fallback Engine: openai/gpt-oss-20b"]
     end
 
-    subgraph StorageLayer ["Persistence & Caching"]
-        PostgreSQL[("Supabase PostgreSQL / Relational DB")]
-        Redis[("Redis Broker & Pub/Sub")]
+    subgraph StorageLayer ["Persistence & Feature Store Layer"]
+        PostgreSQL[("PostgreSQL: Relational OLTP & Analytics")]
+        Redis[("Redis: Celery Broker & Pub/Sub")]
         VectorDB[("ChromaDB: Local Persistent / Chroma Cloud")]
     end
 
-    subgraph WorkerLayer ["Asynchronous Celery Workers"]
-        SentimentWorker["Sentiment Processing Worker"]
-        EmbeddingWorker["Vector Ingestion Worker"]
+    subgraph WorkerLayer ["Asynchronous Distributed Worker Fleet (Celery)"]
+        SentimentWorker["Batch Sentiment Classification Worker"]
+        EmbeddingWorker["Vector Embedding & Indexing Worker"]
     end
 
     Client --> AuthRouter
@@ -82,7 +71,7 @@ graph TD
     UploadRouter --> ParseSvc
     ParseSvc --> PostgreSQL
 
-    ChatRouter -->|Enqueue Task| Redis
+    ChatRouter -->|Dispatch Task| Redis
     Redis --> SentimentWorker
     Redis --> EmbeddingWorker
 
@@ -99,26 +88,48 @@ graph TD
     RetrieverSvc --> EmbeddingModel
     RetrieverSvc --> VectorDB
     RouterSvc --> GroqPrimary
-    GroqPrimary -. Fallback .-> GroqFallback
+    GroqPrimary -. Automatic Failover .-> GroqFallback
     RouterSvc --> PostgreSQL
 ```
 
 ---
 
-## 🔍 Multi-Tier Agentic RAG Pipeline
+## ⚡ Core Engineering Highlights
+
+### 1. Data Engineering & Asynchronous ETL Pipelines
+- **Stream-Safe Ingestion:** Custom regex streaming parser processes WhatsApp conversation logs, normalizing variations in ISO timestamps, sender aliases, systemic system notifications, and multi-line message boundaries.
+- **Relational Dimensional Modeling:** Deconstructs chats into normalized schemas: `chats`, `participants`, `messages`, `time_segments`, `sender_segments`, and granular sentiment scores.
+- **Event-Driven Distributed Workloads:** Celery workers process long-running batch NLP jobs across dedicated queues (`sentiment`, `embeddings`), publishing real-time telemetry back to clients via Redis Pub/Sub and SSE.
+
+### 2. High-Performance Local MLOps (CPU-Quantized ONNX)
+- **Zero API Dependency for Embeddings:** Instead of relying on rate-limited, expensive external embedding APIs, the system utilizes local **`Davlan/afro-xlmr-mini` INT8 ONNX**.
+- **Vector Pooling & Normalization:** Performs attention-masked mean pooling followed by $L_2$ vector normalization to generate deterministic 384-dimensional dense vectors:
+  $$\mathbf{e} = \frac{\sum_{i=1}^{L} m_i \mathbf{h}_i}{\sum_{i=1}^{L} m_i}, \quad \hat{\mathbf{e}} = \frac{\mathbf{e}}{\|\mathbf{e}\|_2}$$
+- **Domain-Adapted Multi-Lingual Sentiment Classifier:** Integrated **`JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment`** INT8 ONNX model, purpose-trained for Nigerian Pidgin, Hausa, Yoruba, Igbo, and English mixed-code conversational semantics.
+
+### 3. Multi-Tier Agentic RAG Architecture
+- **Hierarchical Request Routing:** Employs a multi-stage decision graph to route queries with minimal compute overhead:
+  - **Tier 1 (Fast Trap):** Sub-millisecond regex matching for conversational greetings and generic boilerplate.
+  - **Tier 2 (Analytical SQL):** Dynamic translation of quantitative queries (e.g., *"Who sent the most messages in October?"*) into parameterized, safe PostgreSQL queries.
+  - **Tier 3 (Scoped Semantic Retrieval):** Extraction of temporal and sender metadata filters to execute filtered dense vector search against ChromaDB.
+  - **Tier 4 (Grounded Anti-Leak Synthesis):** Assembles verified tabular results and top-$K$ semantic context chunks into a grounded LLM prompt, enforcing strict anti-leak and hallucination guardrails.
+
+---
+
+## 🔄 End-to-End RAG Sequence Flow
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as User
+    actor User as Client
     participant API as FastAPI Router
     participant LLMRouter as Groq Router (qwen3.6-27b)
-    participant SQL as Supabase PostgreSQL
-    participant Embed as Local ONNX Embedder
-    participant Chroma as ChromaDB / Chroma Cloud
+    participant SQL as PostgreSQL (OLTP/Analytics)
+    participant Embed as Local ONNX Embedder (384d)
+    participant Chroma as ChromaDB Vector Store
     participant Synth as Groq Synthesizer (gpt-oss-120b)
 
-    User->>API: POST /chat/{id}/query/streamed (Question + Analytics JSON)
+    User->>API: POST /chat/{id}/query/streamed (Question + Analytics State)
     
     rect rgb(240, 248, 255)
         Note over API: Tier 1: Fast Trap (Regex Greeting Check)
@@ -127,183 +138,233 @@ sequenceDiagram
 
     API->>LLMRouter: Contextualize & Classify Intent (SQL / Vector / Dashboard / Hybrid)
     
-    alt SQL or Hybrid Query
+    alt Quantitative / Aggregation Query
         API->>LLMRouter: Generate Safe Parameter-Bound SQL (:chat_id)
         LLMRouter-->>API: Validated SQL Query
-        API->>SQL: Execute Read-Only Query with :chat_id parameter
+        API->>SQL: Execute Read-Only Query with :chat_id binding
         SQL-->>API: Tabular Aggregation Results
     end
 
-    alt Vector Search or Hybrid Query
-        API->>LLMRouter: Extract Date & Sender Metadata Filters
-        LLMRouter-->>API: Extracted Filters (time_ranges, sender_names)
-        API->>Embed: Embed Query (Davlan/afro-xlmr-mini INT8 ONNX 384d)
-        Embed-->>API: 384-dimensional Normalized Dense Vector
-        API->>Chroma: Query with Vector + Scoped Metadata Filter
-        Chroma-->>API: Top-K Document Chunks
+    alt Semantic / Conversational Search Query
+        API->>LLMRouter: Extract Date Ranges & Sender Metadata Filters
+        LLMRouter-->>API: Structured Metadata Filters
+        API->>Embed: Compute Query Dense Vector (Davlan/afro-xlmr-mini INT8)
+        Embed-->>API: 384d Normalized Embedding
+        API->>Chroma: Execute Query with Vector + Scoped Metadata Filter
+        Chroma-->>API: Top-K Grounded Context Passages
     end
 
-    API->>Synth: Synthesize Grounded Response (Context + Anti-Leak Prompt)
-    Synth-->>User: SSE Token Stream (data: "...")
-    API->>SQL: Asynchronously Save Conversation Turn & Cited Sources
+    API->>Synth: Stream Grounded Context with Strict Anti-Leak System Prompt
+    Synth-->>User: Server-Sent Events (SSE) Token Stream (`data: "..."`)
+    API->>SQL: Asynchronously Persist Turn & Cited Document Sources
 ```
 
 ---
 
-## 🧩 Component Architecture Breakdown
+## 🔬 Model Fleet & Inference Matrix
 
-### 1. API & Routing Layer (`src/app/api/`)
-- **`auth.py`**: User registration, login, token refresh, and JWT validation.
-- **`chat.py`**: Chat creation, deletion, cancelation, and background job triggering.
-- **`uploads.py`**: WhatsApp `.txt` file streaming upload, regex format parsing, and database population.
-- **`query.py`**: Server-Sent Events (SSE) streaming endpoint for RAG chat querying.
-- **`dashboard.py`**: Aggregated analytics and KPIs for general chat and sentiment visualizations.
-- **`sse.py`**: Real-time progress broadcasting for long-running Celery background jobs.
-
-### 2. Core Services Layer (`src/app/services/`)
-- **`router_service.py`**: Multi-tiered RAG orchestrator with regex fast trap, Groq query routing, filter extraction, SQL generation, and SSE response streaming.
-- **`vector_store.py`**: Abstract `VectorStore` interface and concrete `ChromaVectorStore` supporting `local` (PersistentClient) and `cloud` (CloudClient/HttpClient) modes.
-- **`embedding_service.py`**: CPU-quantized INT8 ONNX embedder for `Davlan/afro-xlmr-mini` with attention mean-pooling and L2 normalization (384 dimensions).
-- **`sentiment_service.py`**: CPU-quantized INT8 ONNX classifier for `JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment` with dynamic `id2label` mapping.
-- **`llm_factory.py`**: Resilient `ChatGroq` model factory with automatic fallback (`openai/gpt-oss-120b` $\rightarrow$ `openai/gpt-oss-20b`) and exponential backoff retry.
-- **`summary_service.py`**: Groq-powered segment summarization and key topic extraction.
-- **`cleanup_service.py`**: Background cleanup and vector deletion for deleted chats and expired accounts.
-
-### 3. Background Workers Layer (`src/app/services/`)
-- **`sentiment_worker.py`**: Celery worker consuming `sentiment` queue for message sentiment classification and segment aggregation.
-- **`embedding_worker.py`**: Celery worker consuming `embeddings` queue for text segment vectorization and ChromaDB upsertion.
-
----
-
-## ⚙️ Model Specifications & Routing Strategy
-
-| Role | Provider / Engine | Model ID / Path | Dimensions / Quantization | Purpose |
+| Component | Architecture / Provider | Model Identifier | Precision & Dimensions | Operational Role |
 | :--- | :--- | :--- | :--- | :--- |
-| **Sentiment Analysis** | Local ONNX Runtime CPU | `JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment` | INT8 ONNX (`v1/onnx_int8/`) | Classifies Nigerian Pidgin & English messages into Positive, Negative, Neutral |
-| **Dense Embeddings** | Local ONNX Runtime CPU | `Davlan/afro-xlmr-mini` | 384 dimensions, INT8 ONNX | Generates vector embeddings for chat segments and RAG semantic retrieval |
-| **Router & SQL Agent** | Groq Cloud | `qwen/qwen3.6-27b` | Open Weights | Fast intent routing, metadata filter extraction, and safe SQL query generation |
-| **Primary Synthesis** | Groq Cloud | `openai/gpt-oss-120b` | Open Weights | Master RAG answer generation, reasoning, and context synthesis |
-| **Fallback Synthesis** | Groq Cloud | `openai/gpt-oss-20b` | Open Weights | Resilient failover LLM and conversational contextualizer |
+| **Sentiment Inference** | ONNX Runtime CPU | `JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment` | INT8 Quantized (`v1/onnx_int8/`) | Classifies Nigerian Pidgin & English messages into Positive, Negative, and Neutral. |
+| **Dense Vector Embeddings** | ONNX Runtime CPU | `Davlan/afro-xlmr-mini` | 384-dimensional, INT8 Quantized | Local vectorization of chat segments for semantic similarity and hybrid retrieval. |
+| **Query Intent & SQL Router** | Groq Cloud Engine | `qwen/qwen3.6-27b` | Open Weights | Rapid intent classification, filter parameter extraction, and safe SQL statement synthesis. |
+| **Primary RAG Synthesizer** | Groq Cloud Engine | `openai/gpt-oss-120b` | Open Weights | Master reasoning engine generating coherent, source-attributed conversational answers. |
+| **Fallback & Contextualizer** | Groq Cloud Engine | `openai/gpt-oss-20b` | Open Weights | Conversational turn re-writing and automated failover layer during network spikes. |
 
 ---
 
-## 🗄 Vector Storage Strategy
+## 🗃 Storage & Persistence Design
 
-The backend uses a clean **`VectorStore` abstraction** allowing seamless switching between environments:
+```
+                                  ┌──────────────────────────────┐
+                                  │   Application Service Layer  │
+                                  └──────────────┬───────────────┘
+                                                 │
+                        ┌────────────────────────┴────────────────────────┐
+                        ▼                                                 ▼
+        ┌───────────────────────────────┐                 ┌───────────────────────────────┐
+        │  PostgreSQL (Relational OLTP) │                 │      VectorStore Interface    │
+        ├───────────────────────────────┤                 ├───────────────────────────────┤
+        │ • chats                       │                 │ Local Mode: Persistent SQLite │
+        │ • participants                │                 │ Cloud Mode: Chroma Cloud API  │
+        │ • messages & sentiments       │                 │ • 384d Dense Vector Search    │
+        │ • time_segments & metrics     │                 │ • Scoped $and / $or Metadata  │
+        │ • chat_history & citations    │                 │ • Per-Chat Index Isolation    │
+        └───────────────────────────────┘                 └───────────────────────────────┘
+```
 
-- **Local Mode (`CHROMA_MODE=local`)**:
-  - Uses `chromadb.PersistentClient(path="./data/chroma")`.
-  - Stores SQLite metadata and HNSW binary indices on disk for offline local development and unit testing.
-- **Cloud Mode (`CHROMA_MODE=cloud`)**:
-  - Uses `chromadb.CloudClient` / `HttpClient`.
-  - Authenticates via `CHROMA_API_KEY`, `CHROMA_TENANT`, and `CHROMA_DATABASE`.
-  - Enables zero-filesystem, stateless container deployments on Heroku Eco Dynos.
+- **Relational Storage:** Relational integrity enforced via SQLAlchemy models, index optimization on `(chat_id, timestamp)`, and foreign-key cascading.
+- **Abstract Vector Storage Layer:** Polymorphic `VectorStore` ABC decoupling business logic from underlying vector database implementations, supporting seamless migration between **Local Persistent ChromaDB** (`./data/chroma`) and **Multi-Tenant Chroma Cloud**.
 
 ---
 
-## 🔐 Environment Configuration
+## 🛡 Security Threat Modeling & Prompt Injection Defense
 
-Create a `.env` file in the project root:
+1. **SQL Injection Defense:**
+   - LLM-generated queries are strictly validated against an AST-level syntax filter.
+   - Prohibits destructive DDL/DML keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `GRANT`).
+   - Restricts queries to whitelist tables (`messages`, `time_segments`, `participants`, `message_sentiments`).
+   - Enforces parameter binding (`:chat_id`) at execution time; cross-tenant query attempts are systematically rejected.
+2. **System Prompt Hardening:**
+   - Enforces strict role boundary isolation to prevent prompt jailbreaks.
+   - Enforces explicit ground-truth citation rules to eliminate hallucinated sources.
+
+---
+
+## 🔮 Future Architectural Roadmap: Deterministic Agentic Tool Calling
+
+To further elevate system safety, eliminate unstructured prompt parsing, and defend against advanced prompt injection vectors, the following architectural upgrades are actively planned:
+
+```mermaid
+graph LR
+    UserQuery["User Input Query"] --> AgentSupervisor["Agent Supervisor / LangGraph / LangChain"]
+    
+    subgraph DeterministicToolExecution ["Deterministic Structured Tool Dispatch"]
+        AgentSupervisor -->|Strict Pydantic Schema| ToolSQL["SQL Query Tool (Safe Sandboxed Read Engine)"]
+        AgentSupervisor -->|Strict Pydantic Schema| ToolVector["Vector Retrieval Tool (Chroma Filter Engine)"]
+        AgentSupervisor -->|Strict Pydantic Schema| ToolDash["Dashboard Metric Tool (Aggregator Engine)"]
+    end
+
+    ToolSQL --> ExecutionGuard["AST Query Validator & RBAC Sandbox"]
+    ToolVector --> ChromaIndex["ChromaDB Scoped Collection"]
+    ToolDash --> MetricEngine["Pre-aggregated Analytics Store"]
+```
+
+### Planned Tool Calling Capabilities:
+1. **Pydantic-Enforced Function Calling:**
+   - Migrate SQL generation and dashboard exploration to native Groq tool calling (`tools` API).
+   - Replaces JSON string parsing with strongly-typed parameter validation schemas.
+2. **Deterministic SQL Tool Sandbox:**
+   - Encapsulate database interactions inside an isolated `ExecuteSafeSQLQuery` tool.
+   - Tool verifies tenant isolation cryptographically before submitting queries through read-only database connections.
+3. **Multi-Agent Supervisor Hierarchy:**
+   - Implement stateful agent graphs (e.g., using LangGraph) to orchestrate multi-step reasoning:
+     - Step 1: Tool Selection & Argument Validation
+     - Step 2: Parallel Tool Execution (SQL aggregation + Semantic Search)
+     - Step 3: Synthesis & Hallucination Verification
+
+---
+
+## 📂 Repository Structure
+
+```
+├── src/
+│   ├── app/
+│   │   ├── api/                     # FastAPI Route Definitions
+│   │   │   ├── auth.py              # User registration & JWT authentication
+│   │   │   ├── chat.py              # Chat lifecycle & task orchestration
+│   │   │   ├── uploads.py           # Streamed file uploads & parser trigger
+│   │   │   ├── query.py             # Server-Sent Events (SSE) RAG query stream
+│   │   │   ├── dashboard.py         # Tabular aggregations & KPI metrics
+│   │   │   └── sse.py               # Celery task progress broadcasting
+│   │   ├── services/                # Core Business Logic & Inferences
+│   │   │   ├── router_service.py    # Multi-tier RAG routing & synthesis
+│   │   │   ├── vector_store.py      # Abstract VectorStore & ChromaDB implementation
+│   │   │   ├── embedding_service.py # Local INT8 ONNX dense embedder (384d)
+│   │   │   ├── sentiment_service.py # Local INT8 ONNX Nigerian sentiment classifier
+│   │   │   ├── llm_factory.py       # Groq model factory with exponential fallback
+│   │   │   ├── summary_service.py   # Groq-powered segment summarization
+│   │   │   ├── parser.py            # Stream-based WhatsApp chat log parser
+│   │   │   ├── sentiment_worker.py  # Celery batch sentiment processing worker
+│   │   │   ├── embedding_worker.py  # Celery batch vector embedding worker
+│   │   │   └── cleanup_service.py   # User and chat lifecycle data pruning
+│   │   ├── db/                      # SQLAlchemy Engine, Base, and Session
+│   │   ├── models/                  # Relational ORM Database Models
+│   │   ├── schemas/                 # Pydantic Request / Response Contracts
+│   │   ├── config.py                # Pydantic Settings & Environment Validation
+│   │   ├── celery_app.py            # Celery Distributed Task Queue Instance
+│   │   └── main.py                  # Application Factory & Middleware Configuration
+├── tests/                           # Pytest Test Suite
+│   ├── test_config.py               # Settings & environment validation tests
+│   ├── test_vector_store.py         # ChromaDB Local CRUD & inference tests
+│   └── live/                        # Integration test harnesses
+├── Dockerfile                       # Multi-stage production container specification
+├── start.sh                         # Dynamic runtime startup script
+├── requirements.txt                 # Pinned application dependencies
+├── .env.example                     # Environment template with parameter documentation
+└── README.md                        # Architectural documentation
+```
+
+---
+
+## ⚙️ Environment Configuration
+
+Refer to [`.env.example`](./.env.example) for the full list of configuration options:
 
 ```env
-# =================================================================
-# Database & Cache
-# =================================================================
-DATABASE_URL=postgresql+asyncpg://postgres.your-project:password@aws-0-eu-west-1.pooler.supabase.com:6543/postgres
-CELERY_BROKER_URL=redis://localhost:6379/0
+# Database Configuration
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/sentiment_db
 
-# =================================================================
-# Groq LLM Configuration
-# =================================================================
-GROQ_API_KEY=gsk_your_groq_api_key_here
+# ChromaDB Vector Store
+CHROMA_MODE=local                      # 'local' or 'cloud'
+CHROMA_COLLECTION_NAME=sentiment-scope
+CHROMA_PERSIST_DIRECTORY=./data/chroma
+
+# Chroma Cloud (Required when CHROMA_MODE=cloud)
+CHROMA_HOST=api.trychroma.com
+CHROMA_API_KEY=ck-your_chroma_api_key
+CHROMA_TENANT=your_tenant_id
+CHROMA_DATABASE=your_database_name
+
+# Groq LLM Engine
+GROQ_API_KEY=gsk_your_groq_api_key
 GROQ_MODEL_PRIMARY=openai/gpt-oss-120b
 GROQ_MODEL_FALLBACK=openai/gpt-oss-20b
 GROQ_MODEL_ROUTER=qwen/qwen3.6-27b
 
-# =================================================================
-# Local ONNX Inference Models
-# =================================================================
+# Local ONNX Models
 SENTIMENT_MODEL_REPO=JohnAlbarkaIbrahim/afroxlmr-mini-nigerian-sentiment
 SENTIMENT_MODEL_SUBFOLDER=v1/onnx_int8
-SENTIMENT_MODEL_DIR=./models/sentiment_onnx_int8
-
 EMBEDDING_MODEL_REPO=Davlan/afro-xlmr-mini
-EMBEDDING_MODEL_DIR=./models/afro_mini_onnx_int8
 
-# =================================================================
-# ChromaDB Vector Store
-# =================================================================
-CHROMA_MODE=cloud                  # 'local' or 'cloud'
-CHROMA_COLLECTION_NAME=chat_embeddings
-CHROMA_PERSIST_DIRECTORY=./data/chroma
+# Celery & Redis
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
 
-# Chroma Cloud (Required when CHROMA_MODE=cloud)
-CHROMA_API_KEY=your_chroma_api_key
-CHROMA_TENANT=your_tenant_id
-CHROMA_DATABASE=your_database_name
-
-# =================================================================
-# Authentication & Security
-# =================================================================
-SECRET_KEY=your_secure_jwt_secret_key
+# Security
+SECRET_KEY=your_jwt_secret_key
 JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_DAYS=7
 ```
 
 ---
 
-## 🛠 Local Setup & Testing
+## 🚀 Setup & Local Execution
 
-### 1. Install Dependencies
+### 1. Environment Setup
 ```bash
-python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
+# Clone the repository
+git clone https://github.com/JohnJodinho/whatsapp-sentiment-backend.git
+cd whatsapp-sentiment-backend
 
+# Initialize virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
 ### 2. Run Test Suite
 ```bash
-# Run all unit tests
 pytest tests/ -v
-
-# Run configuration and vector store tests
-pytest tests/test_config.py tests/test_vector_store.py -v
 ```
 
-### 3. Run FastAPI Application
+### 3. Start Development Server
 ```bash
 uvicorn src.app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 4. Run Celery Workers
+### 4. Launch Celery Workers
 ```bash
-# Linux/macOS
+# Unix / macOS:
 celery -A src.app.celery_app worker -Q sentiment,embeddings --loglevel=info
 
-# Windows
+# Windows (Single-Process Pool):
 celery -A src.app.celery_app worker -Q sentiment,embeddings --loglevel=info --pool=solo
 ```
 
----
-
-## 🚢 Docker & Production Deployment (Heroku)
-
-The backend is fully containerized and configured for Heroku Eco Dynos:
-
-### Build and Run Locally with Docker
+### 5. Run via Docker
 ```bash
-docker build -t whatsapp-sentiment-backend .
-docker run -p 8000:8000 -e PORT=8000 --env-file .env whatsapp-sentiment-backend
-```
-
-### Deploy to Heroku Container Registry
-```bash
-heroku login
-heroku container:login
-heroku container:push web --app your-heroku-app-name
-heroku container:release web --app your-heroku-app-name
+docker build -t sentimentscope-backend .
+docker run -p 8000:8000 --env-file .env sentimentscope-backend
 ```
