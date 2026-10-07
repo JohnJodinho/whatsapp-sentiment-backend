@@ -115,13 +115,23 @@ app = FastAPI(title="WhatsApp Sentiment Analysis API", lifespan=lifespan, middle
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+cors_origins = list(settings.CORS_ORIGINS) if settings.CORS_ORIGINS else ["*"]
+for default_origin in [
+    "https://whatsapp-sentiment-frontend.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]:
+    if default_origin not in cors_origins:
+        cors_origins.append(default_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_origins=cors_origins,
+    allow_origin_regex=r"^https?://.*",
+    allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=getattr(settings, "CORS_ALLOW_CREDENTIALS", True),
-    expose_headers=["X-Request-ID", "X-Process-Time-ms"],
+    allow_credentials=True,
+    expose_headers=["*"],
 )
 
 
@@ -196,6 +206,17 @@ app.include_router(sentiment_sse.router, prefix=f"/api/{APP_VERSION}/sentiment",
 app.include_router(dashboard.router, prefix=f"/api/{APP_VERSION}/dashboard", tags=["dashboard"])
 app.include_router(sentiment_dashboard.router, prefix=f"/api/{APP_VERSION}/sentiment-dashboard", tags=["Sentiment Dashboard"])
 app.include_router(rag.router, prefix=f"/api/{APP_VERSION}/rag", tags=["RAG Chat"])
+
+# -----------------------------------------------------------------------------
+# Direct router aliases (supporting frontends requesting /auth, /uploads, etc. directly)
+# -----------------------------------------------------------------------------
+app.include_router(auth.router, prefix="/auth", include_in_schema=False)
+app.include_router(uploads.router, prefix="/uploads", include_in_schema=False)
+app.include_router(chats.router, prefix="/chats", include_in_schema=False)
+app.include_router(sentiment_sse.router, prefix="/sentiment", include_in_schema=False)
+app.include_router(dashboard.router, prefix="/dashboard", include_in_schema=False)
+app.include_router(sentiment_dashboard.router, prefix="/sentiment-dashboard", include_in_schema=False)
+app.include_router(rag.router, prefix="/rag", include_in_schema=False)
 
 
 def _log_startup_banner():

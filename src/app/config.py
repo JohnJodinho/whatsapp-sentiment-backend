@@ -72,6 +72,28 @@ class Settings(BaseSettings):
 
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    import json
+                    return json.loads(v)
+                except Exception:
+                    pass
+            origins = [origin.strip() for origin in v.split(",") if origin.strip()]
+            return origins if origins else ["*"]
+        elif isinstance(v, list) and v:
+            return v
+        return [
+            "https://whatsapp-sentiment-frontend.vercel.app",
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "*",
+        ]
+
     @model_validator(mode="before")
     @classmethod
     def assemble_database_url(cls, values):
