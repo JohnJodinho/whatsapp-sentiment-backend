@@ -81,3 +81,4 @@ sentiment_onnx_int8/
 scripts/
 github_actions_worker_nexus.md
 api_docs.md
+issues.txt

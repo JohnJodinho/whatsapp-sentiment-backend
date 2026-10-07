@@ -17,8 +17,6 @@ from src.app.utils.raw_txt_parser import WhatsAppChatParser, CleanedMessage
 from src.app.utils.pre_process import clean_messages
 from src.app.utils.segment_chat import segment_by_time, group_by_sender
 from src.app.utils.extract_file_name import extract_chat_title
-from src.app.services.sentiment_worker import analyze_sentiment_task
-from src.app.services.embedding_worker import generate_embeddings_task
 from src.app.security import get_current_user
 from src.app.limiter import limiter
 import logging
@@ -92,6 +90,8 @@ async def upload_whatsapp_chat_file(
                 dispatch_res = await dispatch_chat_worker(chat_result.id)
                 if dispatch_res.get("status") == "error":
                     log.warning("GitHub Actions dispatch error (%s); falling back to Celery.", dispatch_res.get("message"))
+                    from src.app.services.embedding_worker import generate_embeddings_task
+                    from src.app.services.sentiment_worker import analyze_sentiment_task
                     generate_embeddings_task.delay(chat_result.id)
                     analyze_sentiment_task.delay(chat_result.id)
                 else:
@@ -99,12 +99,16 @@ async def upload_whatsapp_chat_file(
             except Exception as e:
                 log.warning("GitHub Actions dispatch failed (%s); falling back to local Celery tasks.", e)
                 try:
+                    from src.app.services.embedding_worker import generate_embeddings_task
+                    from src.app.services.sentiment_worker import analyze_sentiment_task
                     generate_embeddings_task.delay(chat_result.id)
                     analyze_sentiment_task.delay(chat_result.id)
                 except Exception as celery_err:
                     log.error("Fallback Celery invocation failed: %s", celery_err)
         else:
             try:
+                from src.app.services.embedding_worker import generate_embeddings_task
+                from src.app.services.sentiment_worker import analyze_sentiment_task
                 generate_embeddings_task.delay(chat_result.id)
                 analyze_sentiment_task.delay(chat_result.id)
             except Exception as celery_err:

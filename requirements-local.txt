@@ -1,0 +1,6 @@
+# Optional Local Development & Celery Testing Dependencies
+-r requirements.txt
+celery
+kombu
+pytest
+pytest-asyncio

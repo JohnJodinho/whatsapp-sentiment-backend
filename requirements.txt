@@ -1,29 +1,28 @@
-# --- Core Async & Web ---
-aiofiles
-aiohappyeyeballs
-aiohttp
-aiosignal
-aiosqlite
-anyio
-asyncpg
+# =================================================================
+# SentimentScope — Production Web API Requirements (Render)
+# (Worker compute decoupled to GitHub Actions)
+# =================================================================
+
+# --- Core Async & Web Framework ---
 fastapi
-h11
-httpcore
-httpx
-httpx-sse
-starlette
 uvicorn
-python-multipart
+starlette
 slowapi
 limits
+python-multipart
 email-validator
-dnspython
+aiofiles
+aiohttp
+httpx
+httpx-sse
+anyio
 
-# --- Database & Migrations ---
-alembic
+# --- Database & Cache ---
 sqlalchemy
+asyncpg
 psycopg-binary
 psycopg
+alembic
 redis
 greenlet
 pgvector
@@ -32,91 +31,29 @@ chromadb
 # --- Auth & Security ---
 PyJWT
 passlib[bcrypt]
-python-jose
 python-dotenv
 
-# --- AI, ML & Data Science ---
-transformers
-optimum[onnxruntime]
-onnxruntime
-onnx
-scikit-learn
-scipy
-numpy
-pandas
-networkx
-tiktoken
-tokenizers
-safetensors
-regex
-pydantic
-pydantic-settings
-pydantic_core
-
-# --- Groq & LLMs ---
+# --- LLM Orchestration & Generation ---
 openai
 groq
+langchain-core
 langchain-groq
 
-# --- LangChain Ecosystem ---
-langchain
-langchain-classic
-langchain-community
-langchain-core
-langchain-openai
-langchain-text-splitters
-langgraph
-langgraph-checkpoint
-langgraph-prebuilt
-langgraph-sdk
-langsmith
+# --- Lightweight CPU ONNX Query Embedding (Zero Torch / Zero CUDA) ---
+onnxruntime
+transformers
+tokenizers
+huggingface-hub
+numpy
+regex
 
-# --- Celery & Queue ---
-celery
-kombu
-amqp
-billiard
-vine
-
-# --- Utilities & processing ---
+# --- Application Utilities & Validation ---
+pydantic
+pydantic-settings
 requests
-requests-toolbelt
-tqdm
-colorama
-coloredlogs
-click
-click-didyoumean
-click-plugins
-click-repl
-cachetools
-charset-normalizer
-idna
-jinja2
-joblib
-marshmallow
-multidict
-packaging
-pillow
-protobuf
-python-dateutil
-pytz
-pyyaml
-six
 tenacity
 typing-extensions
-urllib3
-wrapt
-xxhash
-yarl
-zstandard
-fsspec
-huggingface-hub
-filelock
-frozenlist
-attrs
-annotated-types
-certifi
-soupsieve
-beautifulsoup4
-pytest
-pytest-asyncio
+python-dateutil
+pytz
+jinja2
+click

@@ -1,4 +1,3 @@
-import pandas as pd
 from dataclasses import dataclass
 from typing import List, Optional, Iterable, Callable
 from datetime import datetime
