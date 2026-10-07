@@ -59,8 +59,16 @@ class Settings(BaseSettings):
     DB_CONNECT_RETRIES: int = 3
     DB_CONNECT_BACKOFF_SECONDS: int = 2
 
-    DEBUG: bool = True
+    DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
+
+    # --- GitHub Actions Distributed Worker Configs ---
+    USE_GITHUB_ACTIONS_WORKER: bool = True
+    GITHUB_TOKEN: Optional[str] = None
+    GITHUB_REPO: str = "JohnJodinho/whatsapp-sentiment-backend"
+    GITHUB_WORKFLOW_FILE: str = "sentiment_worker_dispatch.yml"
+    GITHUB_REF: str = "main"
+    MAX_CONCURRENT_RUNNERS: int = 3
 
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
 

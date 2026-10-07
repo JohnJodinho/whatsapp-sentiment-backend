@@ -72,10 +72,31 @@ class AfroXLMRMiniEmbedder:
         if (quant_file.exists() or base_onnx_file.exists()) and (self.model_dir / "tokenizer_config.json").exists():
             return
 
-        log.info("Model artifacts not found at %s. Exporting and quantizing %s...", self.model_dir, self.base_repo)
+        log.info("Model artifacts not found at %s. Attempting download/export for %s...", self.model_dir, self.base_repo)
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        temp_export = self.model_dir.parent / "temp_afro_export"
 
+        # 1. Try Hugging Face Hub download
+        try:
+            from huggingface_hub import hf_hub_download
+            for filename in ["config.json", "tokenizer_config.json", "special_tokens_map.json", "tokenizer.json", "sentencepiece.bpe.model"]:
+                try:
+                    hf_hub_download(repo_id=self.base_repo, filename=filename, local_dir=str(self.model_dir))
+                except Exception:
+                    pass
+
+            for onnx_candidate in ["model_quantized.onnx", "model_optimized.onnx", "model.onnx"]:
+                try:
+                    hf_hub_download(repo_id=self.base_repo, filename=onnx_candidate, local_dir=str(self.model_dir))
+                    if (self.model_dir / onnx_candidate).exists():
+                        log.info("Successfully fetched %s from HF Hub.", onnx_candidate)
+                        return
+                except Exception:
+                    pass
+        except Exception as hub_err:
+            log.debug("HF hub direct download skipped or failed: %s", hub_err)
+
+        # 2. Fallback to optimum-cli if available
+        temp_export = self.model_dir.parent / "temp_afro_export"
         try:
             if temp_export.exists():
                 shutil.rmtree(temp_export)
@@ -100,7 +121,6 @@ class AfroXLMRMiniEmbedder:
 
         except Exception as e:
             log.warning("Optimum-cli export failed: %s. Attempting direct tokenizer load...", e)
-            # Ensure tokenizer at least saved
             try:
                 tokenizer = AutoTokenizer.from_pretrained(self.base_repo)
                 tokenizer.save_pretrained(str(self.model_dir))

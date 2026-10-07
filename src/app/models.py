@@ -52,26 +52,22 @@ class Chat(Base):
     messages: Mapped[List["Message"]] = relationship(
         "Message",
         back_populates="chat",
-        lazy="selectin",
         passive_deletes=True
     )
     time_segments: Mapped[List["TimeSegment"]] = relationship(
         "TimeSegment",
         back_populates="chat",
-        lazy="selectin",
         passive_deletes=True
     )
 
     history: Mapped[List["ConversationHistory"]] = relationship(
         "ConversationHistory",
         back_populates="chat",
-        lazy="selectin",
         passive_deletes=True
     )
     owner: Mapped["User"] = relationship(
         "User", 
         back_populates="chats",
-        lazy="selectin",
         passive_deletes=True
     )
 
@@ -93,13 +89,11 @@ class Participant(Base):
     messages: Mapped[List["Message"]] = relationship(
         "Message",
         back_populates="participant",
-        lazy="selectin",
         passive_deletes=True
     )
     sender_segments: Mapped[List["SenderSegment"]] = relationship(
         "SenderSegment",
         back_populates="participant",
-        lazy="selectin",
         passive_deletes=True
     )
 
@@ -128,13 +122,11 @@ class Message(Base):
     chat: Mapped["Chat"] = relationship(
         "Chat",
         back_populates="messages",
-        lazy="selectin",
         passive_deletes=True
     )
     participant: Mapped[Optional["Participant"]] = relationship(
         "Participant",
-        back_populates="messages",
-        lazy="selectin"
+        back_populates="messages"
     )
     sentiment: Mapped[Optional["MessageSentiment"]] = relationship(
         "MessageSentiment",
@@ -161,13 +153,11 @@ class SenderSegment(Base):
     time_segment: Mapped["TimeSegment"] = relationship(
         "TimeSegment",
         back_populates="sender_segments",
-        lazy="selectin",
         passive_deletes=True
     )
     participant: Mapped["Participant"] = relationship(
         "Participant",
         back_populates="sender_segments",
-        lazy="selectin",
         passive_deletes=True
     )
     sentiment: Mapped[Optional["SegmentSentiment"]] = relationship(
@@ -193,13 +183,11 @@ class TimeSegment(Base):
     chat: Mapped["Chat"] = relationship(
         "Chat",
         back_populates="time_segments",
-        lazy="selectin",
         passive_deletes=True
     )
     sender_segments: Mapped[List["SenderSegment"]] = relationship(
         "SenderSegment",
         back_populates="time_segment",
-        lazy="selectin",
         passive_deletes=True
     )
     
@@ -324,6 +312,5 @@ class ConversationHistory(Base):
     chat: Mapped["Chat"] = relationship(
         "Chat",
         back_populates="history",
-        lazy="selectin",
         passive_deletes=True
     )

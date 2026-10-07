@@ -404,7 +404,7 @@ class RagQueryRequest(BaseModel):
 class RagQueryResponse(BaseModel):
     answer: str
     sources: List[RagSource]
-    route: QueryRoute
+    route: str
 
 class ConversationHistoryItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)

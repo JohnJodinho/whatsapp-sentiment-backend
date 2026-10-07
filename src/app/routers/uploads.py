@@ -86,10 +86,29 @@ async def upload_whatsapp_chat_file(
         )
 
         
-        generate_embeddings_task.delay(chat_result.id)
-        analyze_sentiment_task.delay(chat_result.id)
-
-        
+        if getattr(settings, "USE_GITHUB_ACTIONS_WORKER", False):
+            try:
+                from src.app.services.github_dispatcher import dispatch_chat_worker
+                dispatch_res = await dispatch_chat_worker(chat_result.id)
+                if dispatch_res.get("status") == "error":
+                    log.warning("GitHub Actions dispatch error (%s); falling back to Celery.", dispatch_res.get("message"))
+                    generate_embeddings_task.delay(chat_result.id)
+                    analyze_sentiment_task.delay(chat_result.id)
+                else:
+                    log.info("Dispatched chat %s via GitHub Actions runner: %s", chat_result.id, dispatch_res)
+            except Exception as e:
+                log.warning("GitHub Actions dispatch failed (%s); falling back to local Celery tasks.", e)
+                try:
+                    generate_embeddings_task.delay(chat_result.id)
+                    analyze_sentiment_task.delay(chat_result.id)
+                except Exception as celery_err:
+                    log.error("Fallback Celery invocation failed: %s", celery_err)
+        else:
+            try:
+                generate_embeddings_task.delay(chat_result.id)
+                analyze_sentiment_task.delay(chat_result.id)
+            except Exception as celery_err:
+                log.error("Celery invocation failed: %s", celery_err)
 
         return chat_result
     except HTTPException:

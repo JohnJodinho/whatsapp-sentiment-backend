@@ -144,8 +144,8 @@ class AfroXLMRMiniSentimentClassifier:
 
     def _load_label_mapping(self):
         config_file = self.local_dir / "config.json"
-        self.id2label = {0: "positive", 1: "neutral", 2: "negative"}
-        self.label2id = {"positive": 0, "neutral": 1, "negative": 2}
+        self.id2label = {0: "negative", 1: "neutral", 2: "positive"}
+        self.label2id = {"negative": 0, "neutral": 1, "positive": 2}
 
         if config_file.exists():
             try:

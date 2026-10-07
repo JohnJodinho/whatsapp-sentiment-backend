@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.future import select
-from sqlalchemy import insert, func, delete, select
+from sqlalchemy import insert, func, delete, select, update
 from sqlalchemy.orm import selectinload, joinedload
 from typing import List, Optional, Dict, Tuple, AsyncGenerator
 from src.app import models, schemas
@@ -19,7 +19,12 @@ TIME_PERIOD_BUCKETS = {
 
 
 async def create_chat(db: AsyncSession, owner_id: uuid.UUID,  title: Optional[str] = None, should_commit: bool = True) -> models.Chat:
-    new_chat = models.Chat(title=title, owner_id=owner_id)
+    new_chat = models.Chat(
+        title=title, 
+        owner_id=owner_id,
+        sentiment_status=schemas.SentimentStatusEnum.pending.value,
+        embeddings_status=schemas.EmbeddingStatusEnum.pending.value
+    )
     db.add(new_chat)
     await db.flush()
 
@@ -75,19 +80,21 @@ async def is_chat_cancelled(db: AsyncSession, chat_id: int) -> bool:
     return bool(cancelled)
 
 async def update_chat_status(db: AsyncSession, chat_id: int, status: str):
-    chat = await get_chat(db, chat_id)
-    if chat:
-        chat.sentiment_status = status
-        db.add(chat)
-        await db.commit()
+    await db.execute(
+        update(models.Chat)
+        .where(models.Chat.id == chat_id)
+        .values(sentiment_status=status)
+    )
+    await db.commit()
 
 async def update_chat_embedding_status(db: AsyncSession, chat_id: int, status: str, should_commit: bool = True):
-    chat = await get_chat(db, chat_id)
-    if chat:
-        chat.embeddings_status = status
-        db.add(chat)
-        if should_commit:
-            await db.commit()
+    await db.execute(
+        update(models.Chat)
+        .where(models.Chat.id == chat_id)
+        .values(embeddings_status=status)
+    )
+    if should_commit:
+        await db.commit()
 
 
 async def get_chat_embedding_status(db: AsyncSession, chat_id: int) -> Optional[str]:
@@ -150,6 +157,7 @@ async def get_messages_batch(
     """
     stmt = (
         select(models.Message)
+        .options(joinedload(models.Message.participant))
         .where(models.Message.chat_id == chat_id)
     )
 
@@ -312,6 +320,10 @@ async def get_segments_batch(
 
     stmt = (
         select(models.SenderSegment)
+        .options(
+            joinedload(models.SenderSegment.time_segment),
+            joinedload(models.SenderSegment.participant),
+        )
         .join(models.TimeSegment)
         .where(models.TimeSegment.chat_id == chat_id)
     )

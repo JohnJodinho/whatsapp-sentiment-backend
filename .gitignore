@@ -79,3 +79,5 @@ sentiment_onnx_int8/
 .idea/
 
 scripts/
+github_actions_worker_nexus.md
+api_docs.md

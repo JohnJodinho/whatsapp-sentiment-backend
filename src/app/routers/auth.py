@@ -10,6 +10,13 @@ from src.app.security import ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 
 router = APIRouter()
 
+@router.get("/guest", response_model=dict)
+async def check_guest_auth_health():
+    """
+    Lightweight health probe used by Navbar to detect server availability.
+    """
+    return {"status": "ok", "service": "auth"}
+
 @router.post("/guest", response_model=dict)
 async def create_guest_session(db: AsyncSession = Depends(get_db)):
     """

@@ -1,0 +1,55 @@
+name: Distributed Sentiment & Embedding Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: 'Chat ID to process'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run-worker:
+    name: Sentiment & Vector Processing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Cache Hugging Face & Model Weights
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ./models
+          key: ${{ runner.os }}-hf-weights-v1
+
+      - name: Install Minimal Worker Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-worker.txt
+
+      - name: Execute Worker Runner
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CELERY_BROKER_URL: ${{ secrets.CELERY_BROKER_URL }}
+          CHROMA_API_KEY: ${{ secrets.CHROMA_API_KEY }}
+          CHROMA_TENANT: ${{ secrets.CHROMA_TENANT }}
+          CHROMA_DATABASE: ${{ secrets.CHROMA_DATABASE }}
+          CHROMA_HOST: ${{ secrets.CHROMA_HOST }}
+          CHROMA_PORT: ${{ secrets.CHROMA_PORT }}
+          CHROMA_MODE: ${{ secrets.CHROMA_MODE || 'cloud' }}
+          PYTHONPATH: "."
+        run: |
+          python -m src.app.worker_runner --chat-id "${{ github.event.inputs.chat_id }}"

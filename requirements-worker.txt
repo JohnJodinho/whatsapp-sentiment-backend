@@ -1,0 +1,15 @@
+# Lightweight Worker Requirements for GitHub Actions Runner
+numpy
+onnxruntime
+transformers
+huggingface-hub
+redis
+asyncpg
+sqlalchemy
+chromadb
+pydantic
+pydantic-settings
+python-dotenv
+aiofiles
+requests
+click

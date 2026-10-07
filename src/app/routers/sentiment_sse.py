@@ -18,6 +18,8 @@ log = logging.getLogger(__name__)
 
 REDIS_URL = settings.CELERY_BROKER_URL
 
+import time
+
 async def redis_event_generator(chat_id: int, request: Request):
     # 1. Get the best available Redis (Upstash or Local Fallback)
     redis_client = await get_redis_client(use_async=True)
@@ -27,7 +29,23 @@ async def redis_event_generator(chat_id: int, request: Request):
     try: 
         await pubsub.subscribe(channel)
 
-        # 2. IMMEDIATE Source-of-Truth Sync from Database
+        # 2. Check durable Redis state first (captures queued/provisioning status)
+        try:
+            redis_state = await redis_client.hgetall(f"chat_progress_state:{chat_id}")
+            if redis_state:
+                state_status = redis_state.get("status")
+                if state_status in ["queued", "provisioning"]:
+                    yield f"event: {state_status}\ndata: {json.dumps(redis_state)}\n\n"
+                elif state_status == "completed":
+                    yield f"event: completed\ndata: {json.dumps({'percent': 100, 'status': 'done'})}\n\n"
+                    return
+                elif state_status == "failed":
+                    yield f"event: error\ndata: {json.dumps({'error': redis_state.get('error', 'Analysis failed')})}\n\n"
+                    return
+        except Exception as r_err:
+            log.warning("Could not check durable Redis state for chat %s: %s", chat_id, r_err)
+
+        # 3. Source-of-Truth Sync from Database
         async with AsyncSessionLocal() as db:
             chat = await crud.get_chat(db, chat_id)
             if chat:
@@ -57,21 +75,32 @@ async def redis_event_generator(chat_id: int, request: Request):
                 }
                 yield f"event: progress\ndata: {json.dumps(initial_data)}\n\n"
 
-        # 3. Listen for Real-time Updates
-        async for message in pubsub.listen():
+        # 4. Listen for Real-time Updates with keep-alive heartbeats
+        last_ping = time.time()
+        while True:
             if await request.is_disconnected():
                 break
 
-            if message["type"] == "message":
-                payload = json.loads(message["data"])
-                event_type = payload.get("status", "progress")
-                data_body = json.dumps(payload.get("data", {}))
-                
-                yield f"event: {event_type}\ndata: {data_body}\n\n"
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message and message.get("type") == "message":
+                try:
+                    payload = json.loads(message["data"])
+                    event_type = payload.get("status", "progress")
+                    data_body = json.dumps(payload.get("data", {}))
+                    
+                    yield f"event: {event_type}\ndata: {data_body}\n\n"
 
-                # Stop the stream on terminal events
-                if event_type in ["completed", "failed", "error", "cancelled"]:
-                    break
+                    # Stop the stream on terminal events
+                    if event_type in ["completed", "failed", "error", "cancelled"]:
+                        break
+                except Exception as parse_err:
+                    log.warning("Error parsing pubsub payload: %s", parse_err)
+
+            now = time.time()
+            if now - last_ping >= 15.0:
+                # Standard SSE comment ping to keep proxy connection alive
+                yield ": keep-alive\n\n"
+                last_ping = now
                     
     except Exception as e:
         log.error(f"SSE Error: {e}")

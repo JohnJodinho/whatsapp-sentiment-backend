@@ -106,61 +106,64 @@ async def process_chat_logic(chat_id: int):
     worker_engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
     WorkerSession = async_sessionmaker(worker_engine, expire_on_commit=False)
 
-    async with WorkerSession() as db:
-        chat = await crud.get_chat(db, chat_id)
-        if not chat:
-            return
+    try:
+        async with WorkerSession() as db:
+            await crud.update_chat_status(db, chat_id, models.SentimentStatusEnum.processing.value)
 
-        chat.sentiment_status = models.SentimentStatusEnum.processing.value
-        await db.commit()
-
-        try:
-            # 1. Process Messages
-            buffer = []
-            async for item in crud.stream_unscored_messages(db, chat_id):
-                buffer.append(item)
-                if len(buffer) >= 100:
+            try:
+                # 1. Process Messages
+                buffer = []
+                async for item in crud.stream_unscored_messages(db, chat_id):
+                    buffer.append(item)
+                    if len(buffer) >= 100:
+                        await _process_batch(
+                            db, chat_id, buffer, crud.create_message_sentiment, lambda x: x.content, classifier
+                        )
+                        buffer = []
+                if buffer:
                     await _process_batch(
                         db, chat_id, buffer, crud.create_message_sentiment, lambda x: x.content, classifier
                     )
-                    buffer = []
-            if buffer:
-                await _process_batch(
-                    db, chat_id, buffer, crud.create_message_sentiment, lambda x: x.content, classifier
-                )
 
-            # 2. Process Segments
-            buffer = []
-            async for item in crud.stream_unscored_sender_segments(db, chat_id):
-                buffer.append(item)
-                if len(buffer) >= 100:
+                # 2. Process Segments
+                buffer = []
+                async for item in crud.stream_unscored_sender_segments(db, chat_id):
+                    buffer.append(item)
+                    if len(buffer) >= 100:
+                        await _process_batch(
+                            db, chat_id, buffer, crud.create_segment_sentiment, lambda x: x.combined_text, classifier
+                        )
+                        buffer = []
+                if buffer:
                     await _process_batch(
                         db, chat_id, buffer, crud.create_segment_sentiment, lambda x: x.combined_text, classifier
                     )
-                    buffer = []
-            if buffer:
-                await _process_batch(
-                    db, chat_id, buffer, crud.create_segment_sentiment, lambda x: x.combined_text, classifier
-                )
 
-            # 3. Complete
-            chat.sentiment_status = models.SentimentStatusEnum.completed.value
-            db.add(chat)
-            await db.commit()
-            publish_progress(chat_id, "completed", {"percent": 100, "status": "done"})
+                # 3. Complete
+                await crud.update_chat_status(db, chat_id, models.SentimentStatusEnum.completed.value)
+                publish_progress(chat_id, "completed", {"percent": 100, "status": "done"})
 
-        except Exception as e:
-            await db.rollback()
-            if str(e) == "Cancelled by user":
-                log.info("Chat %s Cancelled.", chat_id)
-            else:
-                log.error("Sentiment processing error: %s", e, exc_info=True)
-                chat.sentiment_status = models.SentimentStatusEnum.failed.value
-                db.add(chat)
-                await db.commit()
-                publish_progress(chat_id, "error", {"error": str(e)})
+            except Exception as e:
+                await db.rollback()
+                if str(e) == "Cancelled by user":
+                    log.info("Chat %s Cancelled.", chat_id)
+                    await crud.update_chat_status(db, chat_id, models.SentimentStatusEnum.cancelled.value)
+                else:
+                    log.error("Sentiment processing error: %s", e, exc_info=True)
+                    try:
+                        await crud.update_chat_status(db, chat_id, models.SentimentStatusEnum.failed.value)
+                    except Exception as update_err:
+                        log.error("Failed to update status to failed for Chat %s: %s", chat_id, update_err)
+                    publish_progress(chat_id, "error", {"error": str(e)})
+                    raise
+    finally:
+        await worker_engine.dispose()
 
 
 @celery_app.task(name="src.app.services.sentiment_worker.analyze_sentiment_task", bind=True)
 def analyze_sentiment_task(self, chat_id: int):
-    asyncio.run(process_chat_logic(chat_id))
+    try:
+        asyncio.run(process_chat_logic(chat_id))
+    except Exception as e:
+        log.error("Sentiment task failed for Chat %s: %s", chat_id, e, exc_info=True)
+        raise

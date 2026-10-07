@@ -1,6 +1,7 @@
 # src/app/celery_app.py
 
 import os
+os.environ["IS_CELERY_WORKER"] = "true"
 import ssl
 from celery import Celery
 from src.app.config import settings
