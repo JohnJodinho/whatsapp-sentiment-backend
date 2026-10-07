@@ -36,6 +36,8 @@ async def redis_event_generator(chat_id: int, request: Request):
                 state_status = redis_state.get("status")
                 if state_status in ["queued", "provisioning"]:
                     yield f"event: {state_status}\ndata: {json.dumps(redis_state)}\n\n"
+                    # Also emit as 'progress' so legacy frontends with only progress listeners get updates
+                    yield f"event: progress\ndata: {json.dumps(redis_state)}\n\n"
                 elif state_status == "completed":
                     yield f"event: completed\ndata: {json.dumps({'percent': 100, 'status': 'done'})}\n\n"
                     return
@@ -89,6 +91,8 @@ async def redis_event_generator(chat_id: int, request: Request):
                     data_body = json.dumps(payload.get("data", {}))
                     
                     yield f"event: {event_type}\ndata: {data_body}\n\n"
+                    if event_type in ["queued", "provisioning"]:
+                        yield f"event: progress\ndata: {data_body}\n\n"
 
                     # Stop the stream on terminal events
                     if event_type in ["completed", "failed", "error", "cancelled"]:
