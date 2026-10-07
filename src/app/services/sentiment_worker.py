@@ -1,5 +1,4 @@
-# src/app/services/sentiment_worker.py
-
+import time
 import asyncio
 import logging
 import json
@@ -21,11 +20,27 @@ log = logging.getLogger(__name__)
 DATABASE_URL = str(settings.DATABASE_URL)
 BROKER_URL = settings.CELERY_BROKER_URL
 
+_worker_redis_client = None
+
+
+def get_worker_redis():
+    """Returns a reused Redis client for worker progress and cancellation checks."""
+    global _worker_redis_client
+    if _worker_redis_client is not None:
+        try:
+            _worker_redis_client.ping()
+            return _worker_redis_client
+        except Exception:
+            _worker_redis_client = None
+
+    _worker_redis_client = get_redis_client(use_async=False)
+    return _worker_redis_client
+
 
 def should_stop(chat_id: int) -> bool:
-    """Checks the currently active Redis for a stop signal."""
+    """Checks the currently active Redis for a stop signal using persistent client."""
     try:
-        r = get_redis_client()
+        r = get_worker_redis()
         if r.exists(f"stop_signal_{chat_id}"):
             log.info("🛑 Stop signal detected for chat %s", chat_id)
             return True
@@ -35,10 +50,27 @@ def should_stop(chat_id: int) -> bool:
 
 
 def publish_progress(chat_id: int, status_key: str, data: dict):
-    """Resilient publishing to active Redis instance."""
+    """
+    Dual-layer publishing to active Redis instance:
+    1. Real-time PubSub broadcast for connected SSE listeners.
+    2. Durable state snapshot (HSET) so reconnecting clients never lose progress.
+    """
     try:
-        r = get_redis_client()
+        r = get_worker_redis()
+        # 1. Live stream broadcast
         r.publish(f"chat_progress_{chat_id}", json.dumps({"status": status_key, "data": data}))
+
+        # 2. Durable state snapshot
+        mapping = {
+            "status": status_key,
+            "percent": str(data.get("percent", 0)),
+            "updated_at": str(time.time()),
+        }
+        for key in ["messages_done", "messages_total", "segments_done", "segments_total", "total", "error", "message"]:
+            if key in data:
+                mapping[key] = str(data[key])
+
+        r.hset(f"chat_progress_state:{chat_id}", mapping=mapping)
     except Exception as e:
         log.error("Failed to publish progress: %s", e)
 
@@ -50,18 +82,21 @@ async def _process_batch(
     create_func,
     get_text_func,
     classifier: AfroXLMRMiniSentimentClassifier,
+    item_type: str,
+    tracker: dict,
 ):
     if not buffer:
         return
+
+    # Check cancellation before batch compute
+    if should_stop(chat_id):
+        raise Exception("Cancelled by user")
 
     # Sort to minimize padding (speedup)
     buffer.sort(key=lambda x: len(get_text_func(x)))
     BATCH_SIZE = 32
 
     for i in range(0, len(buffer), BATCH_SIZE):
-        if should_stop(chat_id):
-            raise Exception("Cancelled by user")
-
         batch_items = buffer[i : i + BATCH_SIZE]
         texts = [get_text_func(item) for item in batch_items]
 
@@ -81,10 +116,14 @@ async def _process_batch(
     # Commit once per buffer
     await db.commit()
 
-    # Update Progress
-    progress = await crud.get_sentiment_progress(db, chat_id)
-    total = progress["messages_total"] + progress["segments_total"]
-    done = progress["messages_scored"] + progress["segments_scored"]
+    # Update Progress in-memory (0 database queries per batch)
+    if item_type == "message":
+        tracker["messages_scored"] += len(buffer)
+    else:
+        tracker["segments_scored"] += len(buffer)
+
+    total = tracker["total"]
+    done = tracker["messages_scored"] + tracker["segments_scored"]
     percent = int(100 * (done / total)) if total > 0 else 0
 
     publish_progress(
@@ -92,10 +131,10 @@ async def _process_batch(
         "progress",
         {
             "percent": percent,
-            "messages_done": progress["messages_scored"],
-            "messages_total": progress["messages_total"],
-            "segments_done": progress["segments_scored"],
-            "segments_total": progress["segments_total"],
+            "messages_done": tracker["messages_scored"],
+            "messages_total": tracker["messages_total"],
+            "segments_done": tracker["segments_scored"],
+            "segments_total": tracker["segments_total"],
             "total": total,
         },
     )
@@ -110,6 +149,16 @@ async def process_chat_logic(chat_id: int):
         async with WorkerSession() as db:
             await crud.update_chat_status(db, chat_id, models.SentimentStatusEnum.processing.value)
 
+            # Query baseline totals once from DB for in-memory tracker
+            initial_progress = await crud.get_sentiment_progress(db, chat_id)
+            tracker = {
+                "messages_total": initial_progress["messages_total"],
+                "messages_scored": initial_progress["messages_scored"],
+                "segments_total": initial_progress["segments_total"],
+                "segments_scored": initial_progress["segments_scored"],
+                "total": initial_progress["messages_total"] + initial_progress["segments_total"],
+            }
+
             try:
                 # 1. Process Messages
                 buffer = []
@@ -117,12 +166,12 @@ async def process_chat_logic(chat_id: int):
                     buffer.append(item)
                     if len(buffer) >= 100:
                         await _process_batch(
-                            db, chat_id, buffer, crud.create_message_sentiment, lambda x: x.content, classifier
+                            db, chat_id, buffer, crud.create_message_sentiment, lambda x: x.content, classifier, "message", tracker
                         )
                         buffer = []
                 if buffer:
                     await _process_batch(
-                        db, chat_id, buffer, crud.create_message_sentiment, lambda x: x.content, classifier
+                        db, chat_id, buffer, crud.create_message_sentiment, lambda x: x.content, classifier, "message", tracker
                     )
 
                 # 2. Process Segments
@@ -131,12 +180,12 @@ async def process_chat_logic(chat_id: int):
                     buffer.append(item)
                     if len(buffer) >= 100:
                         await _process_batch(
-                            db, chat_id, buffer, crud.create_segment_sentiment, lambda x: x.combined_text, classifier
+                            db, chat_id, buffer, crud.create_segment_sentiment, lambda x: x.combined_text, classifier, "segment", tracker
                         )
                         buffer = []
                 if buffer:
                     await _process_batch(
-                        db, chat_id, buffer, crud.create_segment_sentiment, lambda x: x.combined_text, classifier
+                        db, chat_id, buffer, crud.create_segment_sentiment, lambda x: x.combined_text, classifier, "segment", tracker
                     )
 
                 # 3. Complete
